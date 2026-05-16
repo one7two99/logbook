@@ -32,6 +32,8 @@ import shutil
 import socket
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,6 +58,24 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Tags are a bit more permissive — colon is useful for namespacing (e.g. bug:42).
 _TAG_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
+
+# System prompt für `logbook doc` (Schritt 3). Hardcoded; Schritt 4 wird das
+# nach $XDG_CONFIG_HOME/logbook/prompts/*.md verlagern.
+DOC_SYSTEM_PROMPT = """\
+Du bist ein technischer Dokumentar. Erstelle aus dem folgenden
+Installations-Logbuch eine reproduzierbare Schritt-für-Schritt-Dokumentation
+in Markdown.
+
+Regeln:
+- Verwende die `## Section`-Überschriften aus dem Log als Hauptgliederung
+- Erkläre vor jedem Codeblock in 1-2 Sätzen WAS und WARUM
+- Befehle wörtlich beibehalten, nicht "verschönern"
+- Fehlgeschlagene Befehle nicht weglassen: kurz als gescheiterter Versuch
+  erwähnen; folgt ein erfolgreicher Retry, diesen als kanonisch markieren
+- Ton: nüchtern, knapp, Sysadmin-Niveau, kein Marketing
+- Sprache: Deutsch
+- Nichts erfinden — nur was im Log steht oder unmittelbar logisch folgt
+"""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -513,15 +533,13 @@ def cmd_edit(args) -> int:
         return 1
 
 
-def cmd_render(args) -> int:
-    name = args.name or get_active()
-    if not name:
-        print("no session specified and none active", file=sys.stderr)
-        return 1
-    events = load_events(name)
-    if events is None:
-        return 1
+def render_markdown(name: str, events: list[dict]) -> str:
+    """Render events to the Markdown form shown by `logbook render`.
 
+    Pure function — keine I/O — damit `logbook doc` denselben Text als
+    User-Prompt an Ollama schicken kann. Output ist byte-identisch zur
+    vormaligen Inline-Implementierung in cmd_render.
+    """
     init_ev = next((e for e in events if e.get("type") == "init"), None)
     cmd_events = [e for e in events if e.get("type") == "cmd"]
     failed = [e for e in cmd_events if e.get("exit", 0) != 0]
@@ -566,9 +584,174 @@ def cmd_render(args) -> int:
             out.append("```")
             out.append("")
 
-    sys.stdout.write("\n".join(out))
-    if not out[-1].endswith("\n"):
-        sys.stdout.write("\n")
+    return "\n".join(out) + "\n"
+
+
+def cmd_render(args) -> int:
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    events = load_events(name)
+    if events is None:
+        return 1
+    sys.stdout.write(render_markdown(name, events))
+    return 0
+
+
+def ollama_generate(prompt: str, model: str, system: str, endpoint: str, temperature: float):
+    """POSTs to <endpoint>/api/generate with stream=true. Yields response chunks.
+
+    NDJSON-Response: pro Zeile ein JSON-Objekt mit "response"-Feld; die
+    letzte Zeile trägt "done": true. urllib's Response ist iterable über
+    Zeilen — keine Buffer-Akrobatik nötig.
+
+    `think: false`: bei Reasoning-Modellen (qwen3, deepseek-r1, ...) wandert
+    sonst alles in ein "thinking"-Feld und "response" bleibt leer — Caller
+    würde nichts sehen. Für die Docs-Anwendung wollen wir die Antwort, nicht
+    das Reasoning. Auf Nicht-Thinking-Modellen wird das Flag ignoriert.
+    """
+    payload = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": True,
+        "think": False,
+        "options": {
+            "temperature": temperature,
+            "seed": 42,
+        },
+    }
+    req = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/api/generate",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        for raw in resp:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            yield chunk.get("response", "")
+            if chunk.get("done"):
+                return
+
+
+def cmd_doc(args) -> int:
+    if args.commit and not args.save_to:
+        print("--commit requires --save-to", file=sys.stderr)
+        return 2
+
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    events = load_events(name)
+    if events is None:
+        return 1
+
+    user_prompt = render_markdown(name, events)
+
+    if args.prompt_only:
+        sys.stdout.write("=== SYSTEM ===\n")
+        sys.stdout.write(DOC_SYSTEM_PROMPT)
+        if not DOC_SYSTEM_PROMPT.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.write("\n=== USER ===\n")
+        sys.stdout.write(user_prompt)
+        return 0
+
+    collected: list[str] = []
+    got_any = False
+    try:
+        for chunk in ollama_generate(
+            prompt=user_prompt,
+            model=args.model,
+            system=DOC_SYSTEM_PROMPT,
+            endpoint=args.endpoint,
+            temperature=args.temperature,
+        ):
+            if chunk:
+                got_any = True
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+            if args.save_to:
+                collected.append(chunk)
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        if e.code == 404 or "model" in body.lower():
+            print(
+                f"\nModell {args.model!r} nicht installiert. "
+                f"Pull: `ollama pull {args.model}`",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"\nOllama-Fehler: HTTP {e.code} — {body[:200]}", file=sys.stderr)
+        return 1
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ConnectionRefusedError):
+            print(
+                f"\nollama nicht erreichbar unter {args.endpoint}. "
+                f"Läuft `ollama serve`? Status: `systemctl --user status ollama`",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"\nVerbindungsfehler: {e.reason}", file=sys.stderr)
+        return 1
+
+    sys.stdout.write("\n")
+
+    if not got_any:
+        print(
+            "warn: Modell hat keinen sichtbaren Output erzeugt — vermutlich "
+            "ein Thinking-Modell, das `think: false` ignoriert. Versuche ein "
+            "Nicht-Reasoning-Modell (z.B. llama3.1:8b, qwen2.5:7b) oder eine "
+            "neuere Ollama-Version.",
+            file=sys.stderr,
+        )
+
+    if args.save_to:
+        save_dir = Path(args.save_to).expanduser()
+        save_dir.mkdir(parents=True, exist_ok=True)
+        out_path = save_dir / f"{name}.md"
+        out_path.write_text("".join(collected) + "\n", encoding="utf-8")
+        print(f"gespeichert: {out_path}", file=sys.stderr)
+
+        if args.commit:
+            try:
+                r = subprocess.run(
+                    ["git", "-C", str(save_dir), "rev-parse", "--show-toplevel"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except FileNotFoundError:
+                print("warn: `git` nicht im PATH — commit übersprungen", file=sys.stderr)
+                return 0
+            except subprocess.TimeoutExpired:
+                print("warn: git rev-parse Timeout — commit übersprungen", file=sys.stderr)
+                return 0
+            if r.returncode != 0:
+                print(
+                    f"warn: {save_dir} ist kein git-Repo — commit übersprungen, "
+                    f"Datei trotzdem gespeichert",
+                    file=sys.stderr,
+                )
+                return 0
+            repo_root = r.stdout.strip()
+            subprocess.run(["git", "-C", repo_root, "add", "-A"], check=False)
+            subprocess.run(
+                ["git", "-C", repo_root, "commit", "-m", f"logbook doc: {name}"],
+                check=False,
+            )
+
     return 0
 
 
@@ -638,6 +821,16 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("render", help="render session as Markdown on stdout")
     s.add_argument("name", nargs="?", help="session name (default: active)")
     s.set_defaults(func=cmd_render)
+
+    s = sub.add_parser("doc", help="LLM-rendered Doku via Ollama (streamed)")
+    s.add_argument("name", nargs="?", help="session name (default: active)")
+    s.add_argument("--model", default="qwen3.6:35b-a3b", help="Ollama-Modell (default: qwen3.6:35b-a3b)")
+    s.add_argument("--endpoint", default="http://localhost:11434", help="Ollama-Endpoint (default: http://localhost:11434)")
+    s.add_argument("--temperature", type=float, default=0.2, help="sampling temperature (default: 0.2)")
+    s.add_argument("--save-to", metavar="DIR", help="zusätzlich nach <DIR>/<session>.md schreiben")
+    s.add_argument("--commit", action="store_true", help="(nur mit --save-to) git add -A && git commit im Ziel-Repo")
+    s.add_argument("--prompt-only", action="store_true", help="nur System+User-Prompt drucken, kein LLM-Call")
+    s.set_defaults(func=cmd_doc)
 
     # Internal — called by the fish hook
     s = sub.add_parser("_record", help=argparse.SUPPRESS)
