@@ -127,6 +127,8 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 - DONE: `logbook tag <tag>` → setzt einen "pending tag", der dem nächsten
   `cmd`-Event als Feld `tag` mitgegeben wird (state in einer pending-Datei
   im data dir)
+- DONE: `logbook restore [name]` → das von `drop`/`prune` geschriebene
+  `.bak`-Backup atomar zurückspielen
 
 **Implementierungs-Hinweis:** Beim Löschen Zeilen NICHT in-place löschen
 (JSONL ist eine Sequenz; IDs würden sich verschieben). Stattdessen:

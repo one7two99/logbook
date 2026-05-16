@@ -476,6 +476,23 @@ def cmd_prune(args) -> int:
     return 0
 
 
+def cmd_restore(args) -> int:
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    p = session_path(name)
+    bak = p.with_suffix(p.suffix + ".bak")
+    if not bak.exists():
+        print(f"no backup found for {name}: {bak.name}", file=sys.stderr)
+        return 1
+    # Atomic rename — undoes the most recent drop/prune. If the .jsonl is
+    # missing entirely (e.g. user nuked it), restore is even more useful.
+    bak.replace(p)
+    print(f"restored {name} from {bak.name}")
+    return 0
+
+
 def cmd_edit(args) -> int:
     name = args.name or get_active()
     if not name:
@@ -613,6 +630,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--noise", action="store_true", help="apply noise filter retroactively to type:cmd events")
     s.add_argument("name", nargs="?", help="session name (default: active)")
     s.set_defaults(func=cmd_prune)
+
+    s = sub.add_parser("restore", help="restore the .bak backup created by drop/prune")
+    s.add_argument("name", nargs="?", help="session name (default: active)")
+    s.set_defaults(func=cmd_restore)
 
     s = sub.add_parser("render", help="render session as Markdown on stdout")
     s.add_argument("name", nargs="?", help="session name (default: active)")
