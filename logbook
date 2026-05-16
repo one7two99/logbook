@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""
+logbook — install logbook recorder.
+
+Records executed shell commands, prose notes and section markers to JSONL,
+renders to Markdown. LLM integration follows in step 3.
+
+Storage layout (XDG):
+  $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
+    active            — file containing active session name (absent = off)
+    last              — last active session name (for `logbook on`)
+    sessions/<n>.jsonl — the log
+
+Event types in JSONL:
+  {"ts":"...","type":"init","name":"...","host":"...","user":"..."}
+  {"ts":"...","type":"cmd","cmd":"...","cwd":"...","exit":0,"user":"...","host":"..."}
+  {"ts":"...","type":"note","text":"..."}
+  {"ts":"...","type":"section","title":"..."}
+
+Line number in the JSONL file = event ID (1-indexed).
+"""
+
+import argparse
+import json
+import os
+import re
+import socket
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Paths
+
+XDG_DATA = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))) / "logbook"
+SESSIONS = XDG_DATA / "sessions"
+ACTIVE = XDG_DATA / "active"
+LAST = XDG_DATA / "last"
+
+# ---------------------------------------------------------------------------
+# Noise filter — commands we silently drop from automatic recording.
+# The fish hook does a first pass; this is the python-side safety net.
+
+_NOISE_EXACT = {"cd", "ls", "ll", "la", "pwd", "clear", "exit", "logout", "fg", "bg"}
+_NOISE_PREFIXES = ("cd ", "ls ", "logbook ", "logbook\t")
+
+# Valid session names: keep them filesystem-safe and predictable.
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# ---------------------------------------------------------------------------
+# Helpers
+
+def now_iso() -> str:
+    """ISO 8601 with local timezone, second precision."""
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def ensure_dirs() -> None:
+    SESSIONS.mkdir(parents=True, exist_ok=True)
+
+
+def session_path(name: str) -> Path:
+    return SESSIONS / f"{name}.jsonl"
+
+
+def valid_name(name: str) -> bool:
+    return bool(_NAME_RE.match(name)) and not name.startswith(".")
+
+
+def get_active() -> str | None:
+    if ACTIVE.exists():
+        s = ACTIVE.read_text().strip()
+        return s or None
+    return None
+
+
+def set_active(name: str) -> None:
+    ACTIVE.parent.mkdir(parents=True, exist_ok=True)
+    ACTIVE.write_text(name)
+    LAST.write_text(name)
+
+
+def clear_active() -> None:
+    if ACTIVE.exists():
+        ACTIVE.unlink()
+
+
+def append_event(name: str, ev: dict) -> None:
+    p = session_path(name)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    # O_APPEND + single write < PIPE_BUF (4096) is atomic on POSIX.
+    line = json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n"
+    with p.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
+def is_noise(cmd: str) -> bool:
+    c = cmd.strip()
+    if not c:
+        return True
+    if c in _NOISE_EXACT:
+        return True
+    for pfx in _NOISE_PREFIXES:
+        if c.startswith(pfx):
+            return True
+    return False
+
+
+def load_events(name: str) -> list[dict] | None:
+    p = session_path(name)
+    if not p.exists():
+        print(f"session not found: {name}", file=sys.stderr)
+        return None
+    events: list[dict] = []
+    with p.open(encoding="utf-8") as f:
+        for i, raw in enumerate(f, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"warn: {p.name}:{i} invalid json: {e}", file=sys.stderr)
+                continue
+            ev["_line"] = i
+            events.append(ev)
+    return events
+
+
+def host() -> str:
+    return socket.gethostname()
+
+
+def user() -> str:
+    return os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+
+def cmd_init(args) -> int:
+    if not valid_name(args.name):
+        print(f"invalid session name: {args.name!r} (allowed: A-Z a-z 0-9 . _ -)", file=sys.stderr)
+        return 2
+    ensure_dirs()
+    p = session_path(args.name)
+    if p.exists() and not args.force:
+        print(f"session already exists: {args.name} (use --force to overwrite)", file=sys.stderr)
+        return 1
+    if args.force and p.exists():
+        p.unlink()
+    p.touch()
+    append_event(args.name, {
+        "ts": now_iso(),
+        "type": "init",
+        "name": args.name,
+        "host": host(),
+        "user": user(),
+    })
+    set_active(args.name)
+    print(f"session initialized and active: {args.name}")
+    return 0
+
+
+def cmd_on(args) -> int:
+    if not LAST.exists():
+        print("no previous session — use `logbook init <name>` first", file=sys.stderr)
+        return 1
+    name = LAST.read_text().strip()
+    if not name or not session_path(name).exists():
+        print(f"last session not found on disk: {name!r}", file=sys.stderr)
+        return 1
+    set_active(name)
+    print(f"logging on: {name}")
+    return 0
+
+
+def cmd_off(args) -> int:
+    a = get_active()
+    if a:
+        clear_active()
+        print(f"logging off (was: {a})")
+    else:
+        print("logging already off")
+    return 0
+
+
+def cmd_status(args) -> int:
+    a = get_active()
+    if not a:
+        print("inactive")
+        return 0
+    p = session_path(a)
+    if not p.exists():
+        print(f"active session {a!r} but file missing — running `logbook off` is recommended", file=sys.stderr)
+        return 1
+    n = sum(1 for line in p.open(encoding="utf-8") if line.strip())
+    print(f"active: {a}  ({n} events)  → {p}")
+    return 0
+
+
+def cmd_note(args) -> int:
+    a = get_active()
+    if not a:
+        print("no active session", file=sys.stderr)
+        return 1
+    append_event(a, {"ts": now_iso(), "type": "note", "text": args.text})
+    return 0
+
+
+def cmd_section(args) -> int:
+    a = get_active()
+    if not a:
+        print("no active session", file=sys.stderr)
+        return 1
+    append_event(a, {"ts": now_iso(), "type": "section", "title": args.title})
+    return 0
+
+
+def cmd_record(args) -> int:
+    """Internal: called by the fish hook for every executed command."""
+    a = get_active()
+    if not a:
+        return 0  # silently no-op — hook is the gate, this is defense in depth
+    cmd = " ".join(args.command).strip() if args.command else ""
+    if is_noise(cmd):
+        return 0
+    append_event(a, {
+        "ts": now_iso(),
+        "type": "cmd",
+        "cmd": cmd,
+        "cwd": args.cwd or "",
+        "exit": args.exit_code,
+        "user": user(),
+        "host": host(),
+    })
+    return 0
+
+
+def cmd_list(args) -> int:
+    if not SESSIONS.exists():
+        print("(no sessions yet)")
+        return 0
+    a = get_active() or ""
+    items = sorted(SESSIONS.glob("*.jsonl"))
+    if not items:
+        print("(no sessions yet)")
+        return 0
+    for p in items:
+        name = p.stem
+        try:
+            n = sum(1 for line in p.open(encoding="utf-8") if line.strip())
+        except OSError:
+            n = -1
+        marker = "*" if name == a else " "
+        print(f"{marker} {name:<32} {n:>5} events  ({p})")
+    return 0
+
+
+def cmd_show(args) -> int:
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    events = load_events(name)
+    if events is None:
+        return 1
+    for ev in events:
+        i = ev.get("_line", "?")
+        t = ev.get("type", "?")
+        ts = ev.get("ts", "")
+        if t == "cmd":
+            ex = ev.get("exit", 0)
+            mark = "✓" if ex == 0 else f"✗({ex})"
+            print(f"{i:>4}  {ts}  {mark}  $ {ev.get('cmd','')}")
+        elif t == "note":
+            print(f"{i:>4}  {ts}      # {ev.get('text','')}")
+        elif t == "section":
+            print(f"{i:>4}  {ts}      ## {ev.get('title','')}")
+        elif t == "init":
+            print(f"{i:>4}  {ts}      -- init {ev.get('name','')} on {ev.get('host','')}")
+        else:
+            print(f"{i:>4}  {ts}      ? {t} {ev}")
+    return 0
+
+
+def cmd_render(args) -> int:
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    events = load_events(name)
+    if events is None:
+        return 1
+
+    init_ev = next((e for e in events if e.get("type") == "init"), None)
+    cmd_events = [e for e in events if e.get("type") == "cmd"]
+    failed = [e for e in cmd_events if e.get("exit", 0) != 0]
+    first_ts = events[0].get("ts", "") if events else ""
+    last_ts = events[-1].get("ts", "") if events else ""
+    h = init_ev.get("host", "?") if init_ev else "?"
+    u = init_ev.get("user", "?") if init_ev else "?"
+
+    out: list[str] = []
+    out.append(f"# logbook: {name}")
+    out.append("")
+    out.append(f"- **Host:** {h}")
+    out.append(f"- **User:** {u}")
+    out.append(f"- **Beginn:** {first_ts}")
+    out.append(f"- **Ende:** {last_ts}")
+    out.append(f"- **Befehle:** {len(cmd_events)} (davon {len(failed)} fehlgeschlagen)")
+    out.append("")
+
+    for ev in events:
+        t = ev.get("type")
+        if t == "section":
+            out.append("")
+            out.append(f"## {ev.get('title','')}")
+            out.append("")
+        elif t == "note":
+            out.append(f"> {ev.get('text','')}")
+            out.append("")
+        elif t == "cmd":
+            cmd = ev.get("cmd", "")
+            ex = ev.get("exit", 0)
+            cwd = ev.get("cwd", "")
+            ts = ev.get("ts", "")
+            meta_parts = [f"ts: {ts}", f"cwd: {cwd}"]
+            if ex != 0:
+                meta_parts.append(f"exit: {ex}")
+            out.append("```bash")
+            out.append(f"# {' | '.join(meta_parts)}")
+            out.append(cmd)
+            out.append("```")
+            out.append("")
+
+    sys.stdout.write("\n".join(out))
+    if not out[-1].endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="logbook",
+        description="Install-Logbook recorder. Captures CLI commands, notes, and sections to JSONL.",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
+
+    s = sub.add_parser("init", help="start a new session and activate it")
+    s.add_argument("name", help="session name (A-Z a-z 0-9 . _ -)")
+    s.add_argument("--force", action="store_true", help="overwrite existing session")
+    s.set_defaults(func=cmd_init)
+
+    s = sub.add_parser("on", help="resume logging into the last session")
+    s.set_defaults(func=cmd_on)
+
+    s = sub.add_parser("off", help="pause logging")
+    s.set_defaults(func=cmd_off)
+
+    s = sub.add_parser("status", help="show current state")
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("note", help="add a prose note to the active session")
+    s.add_argument("text")
+    s.set_defaults(func=cmd_note)
+
+    s = sub.add_parser("section", help="start a new section (H2 in render)")
+    s.add_argument("title")
+    s.set_defaults(func=cmd_section)
+
+    s = sub.add_parser("list", help="list all sessions")
+    s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("show", help="dump session events as plain text")
+    s.add_argument("name", nargs="?", help="session name (default: active)")
+    s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("render", help="render session as Markdown on stdout")
+    s.add_argument("name", nargs="?", help="session name (default: active)")
+    s.set_defaults(func=cmd_render)
+
+    # Internal — called by the fish hook
+    s = sub.add_parser("_record", help=argparse.SUPPRESS)
+    s.add_argument("--exit-code", type=int, default=0)
+    s.add_argument("--cwd", default="")
+    s.add_argument("command", nargs="+")
+    s.set_defaults(func=cmd_record)
+
+    return p
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args) or 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except BrokenPipeError:
+        sys.exit(0)
