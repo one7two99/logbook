@@ -24,7 +24,9 @@ import argparse
 import json
 import os
 import re
+import shlex
 import socket
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -284,6 +286,25 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_edit(args) -> int:
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    p = session_path(name)
+    if not p.exists():
+        print(f"session not found: {name}", file=sys.stderr)
+        return 1
+    editor = os.environ.get("EDITOR") or "vi"
+    # shlex split so EDITOR="nvim -u NONE" or "code --wait" works.
+    argv = shlex.split(editor) + [str(p)]
+    try:
+        return subprocess.run(argv).returncode
+    except FileNotFoundError:
+        print(f"editor not found: {argv[0]}", file=sys.stderr)
+        return 1
+
+
 def cmd_render(args) -> int:
     name = args.name or get_active()
     if not name:
@@ -378,6 +399,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("show", help="dump session events as plain text")
     s.add_argument("name", nargs="?", help="session name (default: active)")
     s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("edit", help="open the session JSONL in $EDITOR (fallback vi)")
+    s.add_argument("name", nargs="?", help="session name (default: active)")
+    s.set_defaults(func=cmd_edit)
 
     s = sub.add_parser("render", help="render session as Markdown on stdout")
     s.add_argument("name", nargs="?", help="session name (default: active)")
