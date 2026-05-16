@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -286,6 +287,72 @@ def cmd_show(args) -> int:
     return 0
 
 
+def parse_id_range(spec: str) -> tuple[int, int] | None:
+    """'5' → (5,5), '5-10' → (5,10). None if malformed."""
+    s = spec.strip()
+    if "-" in s:
+        a, _, b = s.partition("-")
+        try:
+            lo, hi = int(a), int(b)
+        except ValueError:
+            return None
+        if lo < 1 or hi < lo:
+            return None
+        return (lo, hi)
+    try:
+        n = int(s)
+    except ValueError:
+        return None
+    if n < 1:
+        return None
+    return (n, n)
+
+
+def cmd_drop(args) -> int:
+    rng = parse_id_range(args.spec)
+    if rng is None:
+        print(f"invalid id or range: {args.spec!r} (expected: N or N-M, 1-indexed)", file=sys.stderr)
+        return 2
+    lo, hi = rng
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    p = session_path(name)
+    if not p.exists():
+        print(f"session not found: {name}", file=sys.stderr)
+        return 1
+
+    # Line number in the JSONL file = event ID (per CLAUDE.md). Match on
+    # file line numbers — that's what `show` displays.
+    kept: list[str] = []
+    dropped = 0
+    with p.open(encoding="utf-8") as f:
+        for i, line in enumerate(f, start=1):
+            if lo <= i <= hi:
+                dropped += 1
+            else:
+                kept.append(line)
+
+    if dropped == 0:
+        print(f"no lines in range {lo}-{hi} (file has {len(kept)} lines)", file=sys.stderr)
+        return 1
+
+    # Backup last-good state, then write filtered events to temp file and
+    # atomically rename. Don't edit in place — kill mid-write must leave
+    # either the old or the new file intact.
+    bak = p.with_suffix(p.suffix + ".bak")
+    shutil.copy2(p, bak)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.writelines(kept)
+    tmp.replace(p)
+
+    rng_str = f"{lo}" if lo == hi else f"{lo}-{hi}"
+    print(f"dropped {dropped} line(s) {rng_str} from {name}  (backup: {bak.name})")
+    return 0
+
+
 def cmd_edit(args) -> int:
     name = args.name or get_active()
     if not name:
@@ -404,6 +471,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("edit", help="open the session JSONL in $EDITOR (fallback vi)")
     s.add_argument("name", nargs="?", help="session name (default: active)")
     s.set_defaults(func=cmd_edit)
+
+    s = sub.add_parser("drop", help="delete event(s) by line id (single N or range N-M)")
+    s.add_argument("spec", help="event id (e.g. 5) or range (e.g. 5-10), 1-indexed")
+    s.add_argument("name", nargs="?", help="session name (default: active)")
+    s.set_defaults(func=cmd_drop)
 
     s = sub.add_parser("render", help="render session as Markdown on stdout")
     s.add_argument("name", nargs="?", help="session name (default: active)")
