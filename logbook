@@ -13,9 +13,12 @@ Storage layout (XDG):
 
 Event types in JSONL:
   {"ts":"...","type":"init","name":"...","host":"...","user":"..."}
-  {"ts":"...","type":"cmd","cmd":"...","cwd":"...","exit":0,"user":"...","host":"..."}
+  {"ts":"...","type":"cmd","cmd":"...","cwd":"...","exit":0,"user":"...","host":"...","tag":"..."}
   {"ts":"...","type":"note","text":"..."}
   {"ts":"...","type":"section","title":"..."}
+
+The "tag" field on cmd events is optional, set via `logbook tag <tag>`
+before the next command runs.
 
 Line number in the JSONL file = event ID (1-indexed).
 """
@@ -39,6 +42,7 @@ XDG_DATA = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "sh
 SESSIONS = XDG_DATA / "sessions"
 ACTIVE = XDG_DATA / "active"
 LAST = XDG_DATA / "last"
+PENDING_TAG = XDG_DATA / "pending_tag"
 
 # ---------------------------------------------------------------------------
 # Noise filter — commands we silently drop from automatic recording.
@@ -49,6 +53,9 @@ _NOISE_PREFIXES = ("cd ", "ls ", "logbook ", "logbook\t")
 
 # Valid session names: keep them filesystem-safe and predictable.
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+# Tags are a bit more permissive — colon is useful for namespacing (e.g. bug:42).
+_TAG_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -86,6 +93,21 @@ def set_active(name: str) -> None:
 def clear_active() -> None:
     if ACTIVE.exists():
         ACTIVE.unlink()
+
+
+def get_pending_tag() -> str | None:
+    if not PENDING_TAG.exists():
+        return None
+    try:
+        first = PENDING_TAG.read_text(encoding="utf-8").strip().splitlines()
+        return first[0] if first and first[0] else None
+    except OSError:
+        return None
+
+
+def clear_pending_tag() -> None:
+    if PENDING_TAG.exists():
+        PENDING_TAG.unlink()
 
 
 def append_event(name: str, ev: dict) -> None:
@@ -190,8 +212,11 @@ def cmd_off(args) -> int:
 
 def cmd_status(args) -> int:
     a = get_active()
+    pt = get_pending_tag()
     if not a:
         print("inactive")
+        if pt:
+            print(f"pending tag: {pt}  (no active session to attach to)")
         return 0
     p = session_path(a)
     if not p.exists():
@@ -199,6 +224,8 @@ def cmd_status(args) -> int:
         return 1
     n = sum(1 for line in p.open(encoding="utf-8") if line.strip())
     print(f"active: {a}  ({n} events)  → {p}")
+    if pt:
+        print(f"pending tag: {pt}")
     return 0
 
 
@@ -220,6 +247,33 @@ def cmd_section(args) -> int:
     return 0
 
 
+def cmd_tag(args) -> int:
+    if args.clear:
+        prev = get_pending_tag()
+        clear_pending_tag()
+        if prev:
+            print(f"pending tag cleared (was: {prev})")
+        else:
+            print("no pending tag")
+        return 0
+    if args.tag is None:
+        cur = get_pending_tag()
+        print(f"pending tag: {cur}" if cur else "no pending tag")
+        return 0
+    tag = args.tag.strip()
+    if not _TAG_RE.match(tag):
+        print(f"invalid tag: {args.tag!r} (allowed: A-Z a-z 0-9 . _ - :, 1-64 chars)", file=sys.stderr)
+        return 2
+    PENDING_TAG.parent.mkdir(parents=True, exist_ok=True)
+    prev = get_pending_tag()
+    PENDING_TAG.write_text(tag + "\n", encoding="utf-8")
+    if prev and prev != tag:
+        print(f"pending tag replaced: {prev} → {tag}")
+    else:
+        print(f"pending tag set: {tag}  (attaches to next recorded command)")
+    return 0
+
+
 def cmd_record(args) -> int:
     """Internal: called by the fish hook for every executed command."""
     a = get_active()
@@ -228,7 +282,7 @@ def cmd_record(args) -> int:
     cmd = " ".join(args.command).strip() if args.command else ""
     if is_noise(cmd):
         return 0
-    append_event(a, {
+    ev = {
         "ts": now_iso(),
         "type": "cmd",
         "cmd": cmd,
@@ -236,7 +290,16 @@ def cmd_record(args) -> int:
         "exit": args.exit_code,
         "user": user(),
         "host": host(),
-    })
+    }
+    pending = get_pending_tag()
+    if pending:
+        ev["tag"] = pending
+    append_event(a, ev)
+    # Consume the pending tag *after* the append succeeded — if appending
+    # raised, the tag stays armed for the next attempt rather than getting
+    # silently lost.
+    if pending:
+        clear_pending_tag()
     return 0
 
 
@@ -275,7 +338,9 @@ def cmd_show(args) -> int:
         if t == "cmd":
             ex = ev.get("exit", 0)
             mark = "✓" if ex == 0 else f"✗({ex})"
-            print(f"{i:>4}  {ts}  {mark}  $ {ev.get('cmd','')}")
+            tag = ev.get("tag", "")
+            tag_str = f" [#{tag}]" if tag else ""
+            print(f"{i:>4}  {ts}  {mark}{tag_str}  $ {ev.get('cmd','')}")
         elif t == "note":
             print(f"{i:>4}  {ts}      # {ev.get('text','')}")
         elif t == "section":
@@ -472,7 +537,10 @@ def cmd_render(args) -> int:
             ex = ev.get("exit", 0)
             cwd = ev.get("cwd", "")
             ts = ev.get("ts", "")
+            tag = ev.get("tag", "")
             meta_parts = [f"ts: {ts}", f"cwd: {cwd}"]
+            if tag:
+                meta_parts.append(f"tag: {tag}")
             if ex != 0:
                 meta_parts.append(f"exit: {ex}")
             out.append("```bash")
@@ -518,6 +586,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("section", help="start a new section (H2 in render)")
     s.add_argument("title")
     s.set_defaults(func=cmd_section)
+
+    s = sub.add_parser("tag", help="arm a tag to attach to the next recorded command")
+    s.add_argument("tag", nargs="?", help="tag value (omit to show pending, use --clear to remove)")
+    s.add_argument("--clear", action="store_true", help="clear pending tag")
+    s.set_defaults(func=cmd_tag)
 
     s = sub.add_parser("list", help="list all sessions")
     s.set_defaults(func=cmd_list)
