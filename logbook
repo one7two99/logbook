@@ -353,6 +353,64 @@ def cmd_drop(args) -> int:
     return 0
 
 
+def cmd_prune(args) -> int:
+    if not args.failed and not args.noise:
+        print("specify --failed and/or --noise", file=sys.stderr)
+        return 2
+    name = args.name or get_active()
+    if not name:
+        print("no session specified and none active", file=sys.stderr)
+        return 1
+    p = session_path(name)
+    if not p.exists():
+        print(f"session not found: {name}", file=sys.stderr)
+        return 1
+
+    kept: list[str] = []
+    pruned_failed = 0
+    pruned_noise = 0
+    with p.open(encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                kept.append(raw)
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                # Unparseable lines stay — user might want to fix them by hand.
+                kept.append(raw)
+                continue
+            if ev.get("type") == "cmd":
+                if args.failed and ev.get("exit", 0) != 0:
+                    pruned_failed += 1
+                    continue
+                if args.noise and is_noise(ev.get("cmd", "")):
+                    pruned_noise += 1
+                    continue
+            kept.append(raw)
+
+    total = pruned_failed + pruned_noise
+    if total == 0:
+        print(f"nothing to prune in {name}")
+        return 0
+
+    bak = p.with_suffix(p.suffix + ".bak")
+    shutil.copy2(p, bak)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.writelines(kept)
+    tmp.replace(p)
+
+    parts = []
+    if args.failed:
+        parts.append(f"{pruned_failed} failed")
+    if args.noise:
+        parts.append(f"{pruned_noise} noise")
+    print(f"pruned {total} ({', '.join(parts)}) from {name}  (backup: {bak.name})")
+    return 0
+
+
 def cmd_edit(args) -> int:
     name = args.name or get_active()
     if not name:
@@ -476,6 +534,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("spec", help="event id (e.g. 5) or range (e.g. 5-10), 1-indexed")
     s.add_argument("name", nargs="?", help="session name (default: active)")
     s.set_defaults(func=cmd_drop)
+
+    s = sub.add_parser("prune", help="bulk remove events: --failed and/or --noise")
+    s.add_argument("--failed", action="store_true", help="remove type:cmd with exit != 0")
+    s.add_argument("--noise", action="store_true", help="apply noise filter retroactively to type:cmd events")
+    s.add_argument("name", nargs="?", help="session name (default: active)")
+    s.set_defaults(func=cmd_prune)
 
     s = sub.add_parser("render", help="render session as Markdown on stdout")
     s.add_argument("name", nargs="?", help="session name (default: active)")

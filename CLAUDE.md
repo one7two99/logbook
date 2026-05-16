@@ -119,12 +119,12 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 
 ### Schritt 2 — Edit-Werkzeuge
 
-- `logbook edit [name]` → `$EDITOR` (fallback `vi`) auf der JSONL-Datei
-- `logbook drop <id>` → einzelne Zeile löschen (in-place mit temp file + rename)
-- `logbook drop <start>-<end>` → Range löschen
-- `logbook prune --failed` → alle `type:cmd` mit `exit != 0` entfernen
-- `logbook prune --noise` → Noise-Filter retroaktiv anwenden
-- `logbook tag <tag>` → setzt einen "pending tag", der dem nächsten
+- DONE: `logbook edit [name]` → `$EDITOR` (fallback `vi`) auf der JSONL-Datei
+- DONE: `logbook drop <id>` → einzelne Zeile löschen (in-place mit temp file + rename)
+- DONE: `logbook drop <start>-<end>` → Range löschen
+- TODO: `logbook prune --failed` → alle `type:cmd` mit `exit != 0` entfernen
+- TODO: `logbook prune --noise` → Noise-Filter retroaktiv anwenden
+- TODO: `logbook tag <tag>` → setzt einen "pending tag", der dem nächsten
   `cmd`-Event als Feld `tag` mitgegeben wird (state in einer pending-Datei
   im data dir)
 
