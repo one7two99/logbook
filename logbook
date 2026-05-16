@@ -295,8 +295,9 @@ def cmd_edit(args) -> int:
     if not p.exists():
         print(f"session not found: {name}", file=sys.stderr)
         return 1
-    editor = os.environ.get("EDITOR") or "vi"
-    # shlex split so EDITOR="nvim -u NONE" or "code --wait" works.
+    # VISUAL bevorzugt (full-screen editor), dann EDITOR, dann vi — POSIX-Konvention.
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    # shlex split so VISUAL="nvim -u NONE" or "code --wait" works.
     argv = shlex.split(editor) + [str(p)]
     try:
         return subprocess.run(argv).returncode
