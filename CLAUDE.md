@@ -18,15 +18,26 @@ Stack hinaus — Pragmatismus vor Generalität.
 
 ---
 
-## Aktueller Stand (MVP — Schritt 1, ✅ done)
+## Aktueller Stand (MVP — Schritte 1+2, ✅ done)
 
+**Schritt 1 — Recording + Render:**
 - Python 3 single-file binary (`logbook`), **stdlib only**, kein pip
 - Fish-Integration via `fish_postexec`-Event (`logbook.fish`)
 - JSONL-Storage, XDG-konform
-- Subcommands: `init`, `on`, `off`, `status`, `note`, `section`,
-  `list`, `show`, `render`, intern `_record`
 - Noise-Filter: hardcodierte Liste + Leading-Space-Opt-out
 - Installer (`install.sh`, bash) + README (DE)
+
+**Schritt 2 — Edit-Werkzeuge:**
+- `edit` — Session in `$VISUAL`/`$EDITOR` öffnen
+- `drop <id>` / `drop <start>-<end>` — Event(s) per Line-ID löschen
+- `prune --failed` / `--noise` — Bulk-Remove auf `type:cmd`
+- `tag <tag>` — Pending-Tag fürs nächste `cmd`-Event
+- `restore` — `.bak`-Backup atomar zurückspielen
+- Schreibmechanik: temp file + atomarer Rename, vorher Backup nach `<name>.jsonl.bak`
+
+**Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
+`tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
+intern `_record`
 
 ---
 
@@ -44,10 +55,12 @@ user runs `logbook render`  ←  load JSONL  ←  ─────┘
 
 ```
 $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
-├── active              # contains active session name (absent = off)
+├── active              # active session name (absent = off)
 ├── last                # last active session (for `logbook on`)
+├── pending_tag         # one-shot tag for next cmd event (absent = none)
 └── sessions/
-    └── <name>.jsonl    # the log
+    ├── <name>.jsonl     # the log
+    └── <name>.jsonl.bak # backup, written by drop/prune, restored by `restore`
 ```
 
 ### Event-Schema
@@ -116,26 +129,6 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 ---
 
 ## Nächste Schritte (Priorität absteigend)
-
-### Schritt 2 — Edit-Werkzeuge
-
-- DONE: `logbook edit [name]` → `$EDITOR` (fallback `vi`) auf der JSONL-Datei
-- DONE: `logbook drop <id>` → einzelne Zeile löschen (in-place mit temp file + rename)
-- DONE: `logbook drop <start>-<end>` → Range löschen
-- DONE: `logbook prune --failed` → alle `type:cmd` mit `exit != 0` entfernen
-- DONE: `logbook prune --noise` → Noise-Filter retroaktiv anwenden
-- DONE: `logbook tag <tag>` → setzt einen "pending tag", der dem nächsten
-  `cmd`-Event als Feld `tag` mitgegeben wird (state in einer pending-Datei
-  im data dir)
-- DONE: `logbook restore [name]` → das von `drop`/`prune` geschriebene
-  `.bak`-Backup atomar zurückspielen
-
-**Implementierungs-Hinweis:** Beim Löschen Zeilen NICHT in-place löschen
-(JSONL ist eine Sequenz; IDs würden sich verschieben). Stattdessen:
-gefilterte Events in temp file schreiben, dann atomar umbenennen. Alternative:
-Tombstone-Events einführen (`type:tombstone`, `target:<id>`). Erste Variante
-ist einfacher, dem Reproduzierbarkeitsziel aber weniger zuträglich. Tendiere
-zu Variante 1 mit Backup-Kopie (`<name>.jsonl.bak`).
 
 ### Schritt 3 — Ollama-Integration
 
