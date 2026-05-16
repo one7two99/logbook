@@ -8,9 +8,8 @@
 ## Was ist das?
 
 `logbook` ist ein CLI-Tool, das ausgeführte Shell-Kommandos, Notes und
-Section-Marker in JSONL aufzeichnet, nach Markdown rendert und (in
-einem späteren Schritt) durch ein lokales LLM (Ollama) jagt, um daraus
-Installations-Dokumentationen zu erzeugen.
+Section-Marker in JSONL aufzeichnet, nach Markdown rendert und über
+ein lokales LLM (Ollama) in Installations-Dokumentationen verwandelt.
 
 **Zielsystem:** Single user, Debian 13 (Trixie), Fish shell, Ollama mit
 NVIDIA A4000 (8 GB VRAM), 128 GB RAM. Kein Portabilitätsziel über diesen
@@ -80,8 +79,8 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 // init wird einmal pro Session geschrieben
 {"ts":"ISO8601","type":"init","name":"...","host":"...","user":"..."}
 
-// pro ausgeführtem (gefiltertem) CLI-Kommando
-{"ts":"ISO8601","type":"cmd","cmd":"...","cwd":"...","exit":0,"user":"...","host":"..."}
+// pro ausgeführtem (gefiltertem) CLI-Kommando — "tag" optional
+{"ts":"ISO8601","type":"cmd","cmd":"...","cwd":"...","exit":0,"user":"...","host":"...","tag":"..."}
 
 // manuelle Anmerkung
 {"ts":"ISO8601","type":"note","text":"..."}
