@@ -45,7 +45,6 @@ Stack hinaus — Pragmatismus vor Generalität.
   überspringen ihre Thinking-Phase; wird vom Modell ignoriert, warnt
   das Tool am Ende mit Hinweis auf alternative Modelle
 - HTTP via `urllib.request`, kein Third-Party-Dep
-- `smoke-doc.fish` — Fish-Smoke-Test für `--prompt-only` und Connection-Refused
 
 **Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
 `tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
