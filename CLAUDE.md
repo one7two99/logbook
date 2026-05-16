@@ -18,7 +18,7 @@ Stack hinaus — Pragmatismus vor Generalität.
 
 ---
 
-## Aktueller Stand (MVP — Schritte 1+2, ✅ done)
+## Aktueller Stand (MVP — Schritte 1+2+3, ✅ done)
 
 **Schritt 1 — Recording + Render:**
 - Python 3 single-file binary (`logbook`), **stdlib only**, kein pip
@@ -35,9 +35,21 @@ Stack hinaus — Pragmatismus vor Generalität.
 - `restore` — `.bak`-Backup atomar zurückspielen
 - Schreibmechanik: temp file + atomarer Rename, vorher Backup nach `<name>.jsonl.bak`
 
+**Schritt 3 — Ollama-Integration:**
+- `doc [name]` — rendert Session nach Markdown, POST an Ollamas `/api/generate`,
+  streamt die Antwort token-für-token auf stdout
+- Flags: `--model`, `--endpoint`, `--temperature`, `--save-to DIR`,
+  `--commit` (mit `--save-to`), `--prompt-only`
+- System-Prompt hardcoded (Schritt 4 verlagert das in Config-Files)
+- `think: false` im Payload — Reasoning-Modelle (qwen3, deepseek-r1)
+  überspringen ihre Thinking-Phase; wird vom Modell ignoriert, warnt
+  das Tool am Ende mit Hinweis auf alternative Modelle
+- HTTP via `urllib.request`, kein Third-Party-Dep
+- `smoke-doc.fish` — Fish-Smoke-Test für `--prompt-only` und Connection-Refused
+
 **Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
 `tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
-intern `_record`
+`doc`, intern `_record`
 
 ---
 
@@ -48,7 +60,7 @@ fish_postexec hook   →   logbook _record   →   JSONL append
                                                    │
 user runs `logbook render`  ←  load JSONL  ←  ─────┘
                                                    │
-(Schritt 3:) user runs `logbook doc`  →  render MD  →  POST Ollama  →  output
+user runs `logbook doc`     →  render MD  →  POST Ollama  →  output
 ```
 
 ### Storage-Layout
@@ -129,38 +141,6 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 ---
 
 ## Nächste Schritte (Priorität absteigend)
-
-### Schritt 3 — Ollama-Integration
-
-- `logbook doc [name] [--model ...] [--prompt ...]`
-- Rendert intern erst nach Markdown, packt das in den Prompt, POST an
-  `http://localhost:11434/api/generate` (oder `/api/chat`)
-- **Default-Modell:** `qwen3.6:35b-a3b` (User-Wunsch)
-- `--model qwen3:8b` als Schnell-Override für GPU-only
-- Streaming-Output (`stream: true` in der API) — ans Terminal ausgeben
-  während es generiert wird
-- **Honest warning:** bei 35B MoE auf 8 GB VRAM kommt CPU-Offload zum
-  Tragen. ~6–12 t/s erwartet. Im Code keinen Spinner versprechen, der
-  schneller dreht als die Realität.
-
-Skelett für den HTTP-Call (stdlib only):
-
-```python
-import json, urllib.request
-def ollama_generate(prompt, model, host="http://localhost:11434"):
-    req = urllib.request.Request(
-        f"{host}/api/generate",
-        data=json.dumps({"model": model, "prompt": prompt, "stream": True}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req) as resp:
-        for line in resp:
-            chunk = json.loads(line)
-            yield chunk.get("response", "")
-            if chunk.get("done"):
-                return
-```
 
 ### Schritt 4 — Config + Prompts
 
