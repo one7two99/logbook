@@ -17,7 +17,7 @@ Stack hinaus — Pragmatismus vor Generalität.
 
 ---
 
-## Aktueller Stand (MVP — Schritte 1+2+3, ✅ done)
+## Aktueller Stand (MVP — Schritte 1+2+3+4, ✅ done)
 
 **Schritt 1 — Recording + Render:**
 - Python 3 single-file binary (`logbook`), **stdlib only**, kein pip
@@ -39,11 +39,25 @@ Stack hinaus — Pragmatismus vor Generalität.
   streamt die Antwort token-für-token auf stdout
 - Flags: `--model`, `--endpoint`, `--temperature`, `--save-to DIR`,
   `--commit` (mit `--save-to`), `--prompt-only`
-- System-Prompt hardcoded (Schritt 4 verlagert das in Config-Files)
 - `think: false` im Payload — Reasoning-Modelle (qwen3, deepseek-r1)
   überspringen ihre Thinking-Phase; wird vom Modell ignoriert, warnt
   das Tool am Ende mit Hinweis auf alternative Modelle
 - HTTP via `urllib.request`, kein Third-Party-Dep
+
+**Schritt 4 — Config + Prompt-Templates:**
+- `$XDG_CONFIG_HOME/logbook/config.toml` via stdlib `tomllib`
+- Sections: `[llm]` (model, endpoint, temperature, seed, default_prompt, think),
+  `[output]` (docs_dir, auto_commit), `[filter]` (extra_noise)
+- Resolution-Order: **CLI-Flag > config.toml > Hardcode-Default**
+- `_CONFIG_CACHE` cached pro Invocation (1× File-I/O)
+- `extra_noise`-Konvention: Einträge mit trailing space = Prefix-Match,
+  sonst exact; gilt sowohl für `_record` als auch für `prune --noise`
+- Prompt-Templates in `$XDG_CONFIG_HOME/logbook/prompts/<name>.md`
+- Erster `logbook doc`-Aufruf schreibt idempotent eine **auskommentierte**
+  `config.toml` (Defaults bleiben aktiv, Datei ist Editier-Vorlage) und
+  `prompts/setup-doc.md`. Niemals existierende Files überschreiben.
+- Neue `doc`-Flags: `--prompt NAME`, `--save` (nutzt `[output].docs_dir`)
+- `[llm].think` und `[llm].seed` sind bewusst **Config-only** (kein CLI-Flag)
 
 **Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
 `tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
@@ -71,6 +85,11 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 └── sessions/
     ├── <name>.jsonl     # the log
     └── <name>.jsonl.bak # backup, written by drop/prune, restored by `restore`
+
+$XDG_CONFIG_HOME/logbook/  (default: ~/.config/logbook/)
+├── config.toml         # auto-erstellt beim ersten `doc`, auskommentierte Vorlage
+└── prompts/
+    └── <name>.md       # System-Prompt-Templates (setup-doc.md beim Bootstrap)
 ```
 
 ### Event-Schema
@@ -123,6 +142,10 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 7. **Atomare Appends auf JSONL.** Single `f.write()` mit Zeile < 4 KB
    bleibt unter PIPE_BUF und ist auf POSIX atomar. Nicht in mehrere
    Write-Calls aufteilen.
+8. **Resolution-Order CLI > Config > Default.** Wer eine neue Option
+   einführt: argparse-`default=config_get(section, key, hardcode_default)`.
+   Keine eigenen Lookup-Pfade — Konsistenz ist hier wichtiger als
+   lokale Optimierung.
 
 ---
 
@@ -140,27 +163,17 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
 
 ## Nächste Schritte (Priorität absteigend)
 
-### Schritt 4 — Config + Prompts
+### Schritt 4.5 — Zusätzliche Prompt-Templates
 
-- `$XDG_CONFIG_HOME/logbook/config.toml`
-- Schema-Vorschlag:
-  ```toml
-  [llm]
-  backend = "ollama"          # "ollama" | "anthropic"
-  model = "qwen3.6:35b-a3b"
-  endpoint = "http://localhost:11434"
-  temperature = 0.2
-  seed = 42
-  default_prompt = "setup-doc"
-
-  [filter]
-  extra_noise = ["watch", "htop"]
-  ```
-- Prompt-Templates in `$XDG_CONFIG_HOME/logbook/prompts/*.md`
-- Default-Templates beim ersten Lauf nach `prompts/` schreiben, wenn
-  dort nichts liegt (idempotent — niemals user-files überschreiben)
-- Beispiel-Prompts zum Ausliefern: `setup-doc.md`, `runbook.md`,
-  `ansible-skeleton.md`
+- `runbook.md` — Schritt-für-Schritt-Operations-Anleitung für wiederholte
+  Maintenance-Tasks (z.B. Service-Migration, Backup-Cycle)
+- `ansible-skeleton.md` — Ausgabe als Ansible-Playbook-Skeleton statt
+  Markdown-Prosa
+- Optional: `commit-message.md` — kompakte Commit-Message statt voller Doku
+- Templates landen unter `<XDG_CONFIG>/prompts/` und werden über
+  `--prompt <name>` ausgewählt
+- Die System-Prompt-Konstante `DOC_SYSTEM_PROMPT` im Script bleibt als
+  Last-Resort-Fallback bestehen — nicht löschen
 
 ### Schritt 5 — Cloud-Backend
 

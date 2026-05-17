@@ -1,8 +1,9 @@
 # logbook — Install-Logbook für Debian-Setups
 
-MVP-Stand (Schritte 1+2+3). Erfasst ausgeführte Kommandos, Notes und
+MVP-Stand (Schritte 1+2+3+4). Erfasst ausgeführte Kommandos, Notes und
 Section-Marker in JSONL, rendert nach Markdown und kann die Session über
-ein lokales Ollama in eine Setup-Doku verwandeln.
+ein lokales Ollama in eine Setup-Doku verwandeln. Verhalten ist über
+`~/.config/logbook/config.toml` und Prompt-Templates anpassbar.
 
 Single-File Python 3 + Fish-Hook, **keine externen Abhängigkeiten** (stdlib only).
 
@@ -81,8 +82,14 @@ logbook doc debian-trixie-setup --model qwen3:8b
 # Zusätzlich als <save-to>/<session>.md ablegen
 logbook doc debian-trixie-setup --model qwen3:8b --save-to ~/notes
 
-# In einem Git-Repo: stagen + committen lassen (--commit braucht --save-to)
-logbook doc debian-trixie-setup --model qwen3:8b --save-to ~/notes --commit
+# Oder kürzer: --save nutzt [output].docs_dir aus der config.toml
+logbook doc debian-trixie-setup --save
+
+# In einem Git-Repo: stagen + committen lassen (--commit braucht --save / --save-to)
+logbook doc debian-trixie-setup --save --commit
+
+# Alternatives Prompt-Template (Datei unter ~/.config/logbook/prompts/<name>.md)
+logbook doc debian-trixie-setup --prompt runbook
 
 # Den vollen Prompt rausziehen, ohne LLM zu fragen (z.B. für ein Cloud-Modell)
 logbook doc debian-trixie-setup --prompt-only
@@ -100,6 +107,64 @@ Hinweis auf alternative Modelle (z.B. `qwen2.5:7b`, `llama3.1:8b`).
 `--temperature 0.2` (Default) ist bewusst nüchtern — höher wird
 kreativer und halluzinationsfreudiger, was bei Setup-Dokus selten
 gut tut.
+
+### Konfiguration
+
+Beim ersten `logbook doc <session>` legt das Tool zwei Dateien an, falls
+sie noch nicht existieren — beides idempotent, bestehende Files werden
+nie überschrieben:
+
+```
+~/.config/logbook/config.toml
+~/.config/logbook/prompts/setup-doc.md
+```
+
+Die `config.toml` ist eine **auskommentierte** Vorlage; ohne Edit
+bleiben die Hardcode-Defaults aktiv. Auflösungsreihenfolge ist
+**CLI-Flag > config.toml > Default**.
+
+Schema:
+
+```toml
+[llm]
+# model = "qwen3.6:35b-a3b"          # Ollama-Modell
+# endpoint = "http://localhost:11434"
+# temperature = 0.2
+# seed = 42                          # für reproduzierbare Generationen
+# default_prompt = "setup-doc"       # Datei unter prompts/<name>.md
+# think = false                      # true = Reasoning der Thinking-Modelle erlauben
+
+[output]
+# docs_dir = "~/docs/setups"         # Default-Ziel für `--save`
+# auto_commit = false                # implizites git add+commit nach Speichern
+
+[filter]
+# extra_noise = ["htop", "tmux "]    # zusätzliche Noise-Strings
+```
+
+- `[llm].think` und `[llm].seed` sind bewusst **nur per Config**
+  setzbar, kein CLI-Flag dafür.
+- `--save` ohne Argument nutzt `[output].docs_dir`. Ohne diese
+  Config-Option meldet das Tool einen Fehler. `--save-to DIR` überschreibt
+  den Wert explizit.
+- `auto_commit = true` triggert das gleiche `git add -A && git commit`
+  wie `--commit` — gilt nur, wenn auch wirklich gespeichert wird.
+- `extra_noise`-Einträge **mit trailing space** sind Präfix-Matches
+  (`"tmux "` droppt `tmux attach`, `tmux new` etc.), ohne trailing space
+  exakte Matches (`"htop"` droppt nur `htop` alleine). Greift sowohl
+  in `_record` (live) als auch bei `prune --noise` (retroaktiv).
+
+#### Prompt-Templates
+
+`~/.config/logbook/prompts/<name>.md` ist die Datei, die als
+**System-Prompt** an Ollama geschickt wird. `setup-doc.md` wird beim
+ersten Lauf angelegt — frei editierbar. Zusätzliche Templates einfach
+daneben legen und mit `--prompt <name>` auswählen:
+
+```fish
+$EDITOR ~/.config/logbook/prompts/runbook.md
+logbook doc my-session --prompt runbook
+```
 
 ### Was aufgezeichnet wird
 
@@ -142,6 +207,11 @@ und `logbook prune` (siehe oben).
 └── sessions/
     ├── <name>.jsonl             # die Logs
     └── <name>.jsonl.bak         # Backup von drop/prune, via `logbook restore` zurück
+
+~/.config/logbook/
+├── config.toml                  # auskommentierte Vorlage, beim 1. doc angelegt
+└── prompts/
+    └── <name>.md                # System-Prompt-Templates (setup-doc.md initial)
 ```
 
 Pfade respektieren `$XDG_DATA_HOME` und `$XDG_CONFIG_HOME`.
@@ -188,7 +258,8 @@ Pfade respektieren `$XDG_DATA_HOME` und `$XDG_CONFIG_HOME`.
 | 1 ✅ | MVP: Recording, JSONL, render |
 | 2 ✅ | `edit`, `drop` (id/range), `prune --failed/--noise`, `tag`, `restore` |
 | 3 ✅ | Ollama-Integration (`logbook doc`) — Streaming, `--save-to`, `--commit` |
-| 4    | Config (`~/.config/logbook/config.toml`) + Prompt-Templates |
+| 4 ✅ | Config (`~/.config/logbook/config.toml`) + Prompt-Templates, `--prompt`, `--save`, `auto_commit`, `extra_noise` |
+| 4.5  | Zusätzliche Prompt-Templates: `runbook.md`, `ansible-skeleton.md` |
 | 5    | Cloud-Backend (Anthropic API) als zweites Backend |
 
 Siehe `CLAUDE.md` für Architektur-Notizen und Entwicklungs-Constraints

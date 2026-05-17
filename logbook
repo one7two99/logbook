@@ -32,6 +32,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -46,6 +47,10 @@ ACTIVE = XDG_DATA / "active"
 LAST = XDG_DATA / "last"
 PENDING_TAG = XDG_DATA / "pending_tag"
 
+XDG_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "logbook"
+CONFIG_FILE = XDG_CONFIG / "config.toml"
+PROMPTS_DIR = XDG_CONFIG / "prompts"
+
 # ---------------------------------------------------------------------------
 # Noise filter — commands we silently drop from automatic recording.
 # The fish hook does a first pass; this is the python-side safety net.
@@ -59,8 +64,10 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Tags are a bit more permissive — colon is useful for namespacing (e.g. bug:42).
 _TAG_RE = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 
-# System prompt für `logbook doc` (Schritt 3). Hardcoded; Schritt 4 wird das
-# nach $XDG_CONFIG_HOME/logbook/prompts/*.md verlagern.
+# Last-resort Fallback für den System-Prompt. Wird beim ersten `logbook doc`
+# nach $XDG_CONFIG_HOME/logbook/prompts/setup-doc.md geschrieben — danach
+# editiert der User die Datei. Diese Konstante zieht nur, wenn die Datei
+# weder im Setup angelegt noch vom User aufrufbar ist (sollte nicht passieren).
 DOC_SYSTEM_PROMPT = """\
 Du bist ein technischer Dokumentar. Erstelle aus dem folgenden
 Installations-Logbuch eine reproduzierbare Schritt-für-Schritt-Dokumentation
@@ -76,6 +83,129 @@ Regeln:
 - Sprache: Deutsch
 - Nichts erfinden — nur was im Log steht oder unmittelbar logisch folgt
 """
+
+# Wird beim ersten `logbook doc` als auskommentierte Vorlage nach config.toml
+# geschrieben. Alle Defaults bleiben aktiv; die Datei ist Dokumentation +
+# Editier-Vorlage, kein Pflicht-File.
+DEFAULT_CONFIG_TOML = """\
+# logbook config — alle Defaults sind unten kommentiert.
+# Auskommentieren und anpassen, um Defaults zu überschreiben.
+
+[llm]
+# Ollama-Modell für `logbook doc`. Reasoning-Modelle (qwen3, deepseek-r1)
+# liefern oft bessere Strukturierung, brauchen aber `think = true` damit ihr
+# Output sichtbar wird (siehe unten).
+# model = "qwen3.6:35b-a3b"
+
+# HTTP-Endpoint des Ollama-Servers.
+# endpoint = "http://localhost:11434"
+
+# Sampling-Temperature. 0.0 = deterministisch, 0.2 = nüchtern (Default),
+# höher = kreativer / halluzinationsfreudiger.
+# temperature = 0.2
+
+# Seed für reproduzierbare Generationen (bei Temperature > 0 nur teilweise).
+# seed = 42
+
+# Name des Default-Prompt-Templates (Datei unter prompts/<name>.md).
+# default_prompt = "setup-doc"
+
+# Reasoning erlauben? false = bei Thinking-Modellen wird die Thinking-Phase
+# übersprungen und nur die finale Antwort gestreamt. true = das Modell darf
+# seinen Reasoning-Output produzieren (landet je nach Ollama-Version im
+# response- oder thinking-Feld). Bewusst Config-only, kein CLI-Flag.
+# think = false
+
+[output]
+# Default-Ziel für `logbook doc --save` (ohne expliziten --save-to).
+# Pfad wird mit ~ expandiert.
+# docs_dir = "~/docs/setups"
+
+# Bei jedem Speichern automatisch `git add -A && git commit` im Ziel-Repo.
+# Achtung: committet auch andere unstaged Änderungen im selben Repo.
+# auto_commit = false
+
+[filter]
+# Zusätzliche Noise-Strings. Einträge ohne trailing space = exact match,
+# mit trailing space = prefix match. Beispiel:
+#   extra_noise = ["htop", "tmux "]
+# → "htop" exakt droppen, "tmux ..." per Prefix.
+# extra_noise = []
+"""
+
+# ---------------------------------------------------------------------------
+# Config loading (cached, lazy, never crashes)
+
+_CONFIG_CACHE: dict | None = None
+
+
+def load_config() -> dict:
+    """Lazy load <XDG_CONFIG>/config.toml via tomllib.
+
+    Fehlende Datei → {}. Kaputtes TOML → stderr-Warning + {}. Caller darf
+    sich auf Defaults verlassen, also kein Crash; Resolution-Order
+    (CLI > Config > Default) übernimmt config_get."""
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
+    if not CONFIG_FILE.exists():
+        _CONFIG_CACHE = {}
+        return _CONFIG_CACHE
+    try:
+        with CONFIG_FILE.open("rb") as f:
+            _CONFIG_CACHE = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        print(f"warn: {CONFIG_FILE} ist kaputt ({e}) — verwende Defaults", file=sys.stderr)
+        _CONFIG_CACHE = {}
+    except OSError as e:
+        print(f"warn: {CONFIG_FILE} nicht lesbar ({e}) — verwende Defaults", file=sys.stderr)
+        _CONFIG_CACHE = {}
+    return _CONFIG_CACHE
+
+
+def config_get(section: str, key: str, default):
+    """Lookup mit Fallback. Wird in argparse-defaults aufgerufen, sodass
+    CLI > Config > Hardcode-Default automatisch greift."""
+    sec = load_config().get(section)
+    if not isinstance(sec, dict):
+        return default
+    return sec.get(key, default)
+
+
+def ensure_config_files() -> None:
+    """First-run Setup: legt config.toml + prompts/setup-doc.md an, falls
+    sie fehlen. Idempotent — niemals etwas überschreiben. Wird lazy beim
+    ersten `logbook doc` aufgerufen."""
+    XDG_CONFIG.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_FILE.exists():
+        CONFIG_FILE.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    setup = PROMPTS_DIR / "setup-doc.md"
+    if not setup.exists():
+        setup.write_text(DOC_SYSTEM_PROMPT, encoding="utf-8")
+
+
+def load_prompt(name: str) -> str | None:
+    """Lese prompts/<name>.md.
+
+    Returns:
+      - File content, falls vorhanden
+      - DOC_SYSTEM_PROMPT als Last-Resort-Fallback nur für den well-known
+        'setup-doc'-Namen (defensiv; sollte nach ensure_config_files nicht
+        nötig sein)
+      - None für unbekannte Namen — Caller druckt eine Listing-Fehler-Meldung
+    """
+    p = PROMPTS_DIR / f"{name}.md"
+    if p.exists():
+        try:
+            return p.read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"warn: {p} nicht lesbar ({e})", file=sys.stderr)
+            return None
+    if name == "setup-doc":
+        return DOC_SYSTEM_PROMPT
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -148,6 +278,18 @@ def is_noise(cmd: str) -> bool:
     for pfx in _NOISE_PREFIXES:
         if c.startswith(pfx):
             return True
+    # Config-Erweiterung: trailing space = prefix-match, sonst exact.
+    # Beispiel: ["htop", "tmux "] → "htop" exakt, "tmux ..." per Prefix.
+    extra = config_get("filter", "extra_noise", []) or []
+    for entry in extra:
+        if not isinstance(entry, str) or not entry:
+            continue
+        if entry.endswith(" "):
+            if c.startswith(entry):
+                return True
+        else:
+            if c == entry:
+                return True
     return False
 
 
@@ -616,10 +758,10 @@ def ollama_generate(prompt: str, model: str, system: str, endpoint: str, tempera
         "system": system,
         "prompt": prompt,
         "stream": True,
-        "think": False,
+        "think": bool(config_get("llm", "think", False)),
         "options": {
             "temperature": temperature,
-            "seed": 42,
+            "seed": int(config_get("llm", "seed", 42)),
         },
     }
     req = urllib.request.Request(
@@ -643,8 +785,25 @@ def ollama_generate(prompt: str, model: str, system: str, endpoint: str, tempera
 
 
 def cmd_doc(args) -> int:
-    if args.commit and not args.save_to:
-        print("--commit requires --save-to", file=sys.stderr)
+    # First-run setup: idempotent skeleton config + default prompt template.
+    # Bewusst auch bei --prompt-only, damit der erste Aufruf in beiden Modi
+    # dieselben Files anlegt.
+    ensure_config_files()
+
+    # Save-Ziel auflösen: --save-to (explizit) > --save (config docs_dir) > nichts.
+    if args.save_to:
+        save_dir: Path | None = Path(args.save_to).expanduser()
+    elif args.save:
+        docs_dir = config_get("output", "docs_dir", None)
+        if not docs_dir:
+            print("--save needs [output].docs_dir in config.toml", file=sys.stderr)
+            return 2
+        save_dir = Path(str(docs_dir)).expanduser()
+    else:
+        save_dir = None
+
+    if args.commit and save_dir is None:
+        print("--commit requires --save or --save-to", file=sys.stderr)
         return 2
 
     name = args.name or get_active()
@@ -655,12 +814,29 @@ def cmd_doc(args) -> int:
     if events is None:
         return 1
 
+    # System-Prompt aus Template-Datei. Fehlende Datei → klare Fehlermeldung
+    # mit Listing aller vorhandenen Templates.
+    system = load_prompt(args.prompt)
+    if system is None:
+        avail = sorted(p.stem for p in PROMPTS_DIR.glob("*.md")) if PROMPTS_DIR.exists() else []
+        if avail:
+            print(
+                f"prompt nicht gefunden: {args.prompt!r}\nverfügbar: {', '.join(avail)}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"prompt nicht gefunden: {args.prompt!r} (keine Templates in {PROMPTS_DIR})",
+                file=sys.stderr,
+            )
+        return 1
+
     user_prompt = render_markdown(name, events)
 
     if args.prompt_only:
         sys.stdout.write("=== SYSTEM ===\n")
-        sys.stdout.write(DOC_SYSTEM_PROMPT)
-        if not DOC_SYSTEM_PROMPT.endswith("\n"):
+        sys.stdout.write(system)
+        if not system.endswith("\n"):
             sys.stdout.write("\n")
         sys.stdout.write("\n=== USER ===\n")
         sys.stdout.write(user_prompt)
@@ -672,7 +848,7 @@ def cmd_doc(args) -> int:
         for chunk in ollama_generate(
             prompt=user_prompt,
             model=args.model,
-            system=DOC_SYSTEM_PROMPT,
+            system=system,
             endpoint=args.endpoint,
             temperature=args.temperature,
         ):
@@ -680,7 +856,7 @@ def cmd_doc(args) -> int:
                 got_any = True
             sys.stdout.write(chunk)
             sys.stdout.flush()
-            if args.save_to:
+            if save_dir is not None:
                 collected.append(chunk)
     except urllib.error.HTTPError as e:
         body = ""
@@ -719,14 +895,14 @@ def cmd_doc(args) -> int:
             file=sys.stderr,
         )
 
-    if args.save_to:
-        save_dir = Path(args.save_to).expanduser()
+    if save_dir is not None:
         save_dir.mkdir(parents=True, exist_ok=True)
         out_path = save_dir / f"{name}.md"
         out_path.write_text("".join(collected) + "\n", encoding="utf-8")
         print(f"gespeichert: {out_path}", file=sys.stderr)
 
-        if args.commit:
+        should_commit = args.commit or bool(config_get("output", "auto_commit", False))
+        if should_commit:
             try:
                 r = subprocess.run(
                     ["git", "-C", str(save_dir), "rev-parse", "--show-toplevel"],
@@ -824,11 +1000,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("doc", help="LLM-rendered Doku via Ollama (streamed)")
     s.add_argument("name", nargs="?", help="session name (default: active)")
-    s.add_argument("--model", default="qwen3.6:35b-a3b", help="Ollama-Modell (default: qwen3.6:35b-a3b)")
-    s.add_argument("--endpoint", default="http://localhost:11434", help="Ollama-Endpoint (default: http://localhost:11434)")
-    s.add_argument("--temperature", type=float, default=0.2, help="sampling temperature (default: 0.2)")
+    s.add_argument(
+        "--model",
+        default=config_get("llm", "model", "qwen3.6:35b-a3b"),
+        help="Ollama-Modell (default: aus config.toml oder qwen3.6:35b-a3b)",
+    )
+    s.add_argument(
+        "--endpoint",
+        default=config_get("llm", "endpoint", "http://localhost:11434"),
+        help="Ollama-Endpoint (default: aus config.toml oder http://localhost:11434)",
+    )
+    s.add_argument(
+        "--temperature",
+        type=float,
+        default=float(config_get("llm", "temperature", 0.2)),
+        help="sampling temperature (default: aus config.toml oder 0.2)",
+    )
+    s.add_argument(
+        "--prompt",
+        default=str(config_get("llm", "default_prompt", "setup-doc")),
+        metavar="NAME",
+        help="Prompt-Template <XDG_CONFIG>/prompts/<NAME>.md (default: setup-doc)",
+    )
     s.add_argument("--save-to", metavar="DIR", help="zusätzlich nach <DIR>/<session>.md schreiben")
-    s.add_argument("--commit", action="store_true", help="(nur mit --save-to) git add -A && git commit im Ziel-Repo")
+    s.add_argument(
+        "--save",
+        action="store_true",
+        help="zusätzlich nach [output].docs_dir aus config.toml schreiben",
+    )
+    s.add_argument("--commit", action="store_true", help="(nur mit --save/--save-to) git add -A && git commit im Ziel-Repo")
     s.add_argument("--prompt-only", action="store_true", help="nur System+User-Prompt drucken, kein LLM-Call")
     s.set_defaults(func=cmd_doc)
 
