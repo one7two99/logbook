@@ -1,315 +1,301 @@
-# logbook — Install-Logbook für Debian-Setups
+# logbook
 
-MVP-Stand (Schritte 1+2+3+4+4.5). Erfasst ausgeführte Kommandos, Notes
-und Section-Marker in JSONL, rendert nach Markdown und kann die Session
-über ein lokales Ollama in eine Setup-Doku verwandeln. Verhalten ist
-über `~/.config/logbook/config.toml` und Prompt-Templates anpassbar,
-Daily-Use-Subcommands (`info`, `search`, `config`, `help`) plus Fish
-Tab-Completion.
+> Record what you actually typed during a system setup, edit out the wrong turns, and turn the result into Markdown documentation — optionally rendered through a local LLM.
 
-Single-File Python 3 + Fish-Hook, **keine externen Abhängigkeiten** (stdlib only).
+`logbook` is a single-file Python CLI tool that hooks into the fish shell, captures executed commands plus prose notes and section markers into JSONL, and renders the result as Markdown. With a local Ollama instance running, it can also feed the rendered log through an LLM to produce a polished setup document.
+
+Built for a specific stack — fish shell on Debian — and pragmatic about it. No abstraction layers, no plugin system, no third-party Python dependencies (stdlib only).
+
+---
+
+## At a glance
+
+```fish
+# Start a session — everything you type from here is recorded
+logbook init debian-trixie-setup
+
+logbook section "GPU setup"
+logbook note "535er driver is enough for the A4000"
+
+sudo apt update
+sudo apt install nvidia-driver
+sudo modprobe nvidia          # this one fails — we'll prune it later
+
+logbook section "Docker + NVIDIA Container Toolkit"
+sudo apt install docker.io nvidia-container-toolkit
+sudo systemctl restart docker
+
+# Inspect, prune mistakes, render
+logbook show                  # numbered events with status markers
+logbook prune --failed        # drop everything that exited != 0
+logbook render > setup.md     # straight Markdown export
+
+# Or let a local LLM produce a polished writeup
+logbook doc debian-trixie-setup --model qwen3:8b --save-to ~/docs/setups
+```
+
+---
+
+## Why
+
+System setups end up partially in shell history, partially in scratch notes, partially in nobody's memory. Tools like `script(1)` capture everything verbatim including ANSI escapes and dead-ends; manual documentation tends to fossilize. `logbook` sits in between: passive recording while you work, easy retroactive cleanup, and a clean handoff path to either plain Markdown or an LLM for write-up.
+
+The opinionated parts:
+
+- **Fish shell only.** No bash/zsh hooks. `fish_postexec` is reliable and clean; multiplying shell support would multiply the testing surface.
+- **Local LLM by default.** Ollama integration is built in; cloud backends are not. Local inference means your install log doesn't leave your machine.
+- **stdlib only.** No `pip install`. Drops cleanly into any Debian/Ubuntu host without dependency tangles.
+- **German user-facing strings** for output and prompts. The tool was built for and by a German-speaking sysadmin; output is in German, code/config in English.
+
+---
+
+## Requirements
+
+- **Linux** (developed and tested on Debian 13/Trixie; should work on any glibc Linux with fish)
+- **fish shell** ≥ 3.0
+- **Python 3.11+** (for stdlib `tomllib`)
+- *(optional)* **Ollama** for `logbook doc` — any modern Ollama version, local or remote
+
+No other runtime dependencies.
 
 ---
 
 ## Installation
 
 ```bash
+git clone https://github.com/<you>/logbook.git
+cd logbook
 ./install.sh
 ```
 
-Macht:
+The installer:
 
-1. Kopiert `logbook` nach `~/.local/bin/logbook` (0755)
-2. Kopiert `logbook.fish` nach `~/.config/fish/conf.d/logbook.fish` (0644)
-3. Kopiert `logbook.completions.fish` nach `~/.config/fish/completions/logbook.fish` (0644)
-4. Legt `~/.local/share/logbook/sessions/` an
-5. Prüft `python3 >= 3.11` und ob `~/.local/bin` im `$PATH` ist
+1. Copies `logbook` to `~/.local/bin/logbook`
+2. Copies `logbook.fish` to `~/.config/fish/conf.d/logbook.fish`
+3. Copies `logbook.completions.fish` to `~/.config/fish/completions/logbook.fish`
+4. Creates `~/.local/share/logbook/sessions/`
+5. Verifies `python3 >= 3.11` and reminds you if `~/.local/bin` isn't in `$PATH`
 
-Danach: **neue Fish-Session öffnen** (oder `source ~/.config/fish/conf.d/logbook.fish`).
+After install, open a new fish session (or `source ~/.config/fish/conf.d/logbook.fish`).
 
+### Documentation
+
+A man page is included.
+It is built into the `.deb` automatically; for source installs:
+
+```fish
+# Man page
+pandoc -s -t man man/logbook.1.md -o logbook.1
+gzip -9 logbook.1
+sudo install -m 644 logbook.1.gz /usr/share/man/man1/
+sudo mandb && man logbook
+```
 ---
 
-## Benutzung
+## Usage
 
 ### Recording
 
 ```fish
-logbook init debian-trixie-setup
-# → Session ist aktiv, alles weitere wird aufgezeichnet
+logbook init <session-name>      # start and activate a new session
+logbook section "Phase title"    # add a heading (renders as H2)
+logbook note "free-form prose"   # add a note
+logbook tag <tag>                # tag the next cmd event (one-shot)
 
-logbook section "GPU-Setup"
-logbook note "535er Branch reicht für die A4000"
-logbook tag driver           # nächstes cmd-Event bekommt tag:driver (one-shot)
-sudo apt install nvidia-driver
-
-logbook off                  # pausieren
-logbook on                   # weitermachen (letzte Session)
-logbook status               # aktive Session, Event-Count, pending tag
+logbook off                      # pause recording
+logbook on                       # resume into the last session
+logbook status                   # show current state
 ```
 
-### Anschauen und editieren
+Once a session is active, every command you run is captured automatically — no prefix needed. To opt out of recording for a single command, prefix it with a space (the same convention as `HISTCONTROL=ignorespace` in bash).
+
+### Viewing and editing
 
 ```fish
-logbook show                 # Events der aktiven Session mit Zeilen-IDs
-logbook edit                 # JSONL der aktiven Session in $VISUAL/$EDITOR
+logbook show                     # numbered events with status markers
+logbook list                     # all sessions
+logbook edit                     # open the JSONL of the active session in $EDITOR
 
-logbook drop 12              # Event mit ID 12 löschen
-logbook drop 12-18           # Range löschen
-logbook prune --failed       # alle type:cmd mit exit != 0 entfernen
-logbook prune --noise        # Noise-Filter retroaktiv anwenden
-logbook restore              # letzte drop/prune-Aktion rückgängig (via .bak)
+logbook drop 12                  # delete event with ID 12
+logbook drop 12-18               # delete a range
+logbook prune --failed           # delete all cmd events that exited != 0
+logbook prune --noise            # apply the noise filter retroactively
+logbook restore                  # undo the last drop/prune (single-level)
 ```
 
-`drop` und `prune` schreiben vor jeder Aktion `<session>.jsonl.bak` —
-`logbook restore` zieht das Backup atomar zurück. Das Backup wird bei
-der nächsten destruktiven Operation überschrieben, also zeitnah
-restoren wenn nötig.
+Every destructive operation writes a `<session>.jsonl.bak` first, restorable via `logbook restore`. Backup is single-level — the previous `.bak` is overwritten on every new operation.
 
-### Render und LLM-Doku
+### Rendering and LLM-generated docs
 
 ```fish
-logbook list                 # alle Sessions
-logbook render               # Markdown auf stdout
-logbook render > docs/debian-trixie-setup.md
-```
+logbook render                   # plain Markdown to stdout
+logbook render > setup.md
 
-Für die LLM-Doku via Ollama:
-
-```fish
-# Voraussetzung: `ollama serve` läuft, Modell ist gepullt
+# Through Ollama (must be running locally or reachable)
 ollama pull qwen3:8b
-
-# Streaming auf stdout
-logbook doc debian-trixie-setup --model qwen3:8b
-
-# Zusätzlich als <save-to>/<session>.md ablegen
-logbook doc debian-trixie-setup --model qwen3:8b --save-to ~/notes
-
-# Oder kürzer: --save nutzt [output].docs_dir aus der config.toml
-logbook doc debian-trixie-setup --save
-
-# In einem Git-Repo: stagen + committen lassen (--commit braucht --save / --save-to)
-logbook doc debian-trixie-setup --save --commit
-
-# Alternatives Prompt-Template (Datei unter ~/.config/logbook/prompts/<name>.md)
-logbook doc debian-trixie-setup --prompt runbook
-
-# Den vollen Prompt rausziehen, ohne LLM zu fragen (z.B. für ein Cloud-Modell)
-logbook doc debian-trixie-setup --prompt-only
-
-# Anderer Ollama-Host
-logbook doc debian-trixie-setup --endpoint http://10.0.0.5:11434
+logbook doc <session> --model qwen3:8b
+logbook doc <session> --model qwen3:8b --save-to ~/docs/setups
+logbook doc <session> --save                    # uses [output].docs_dir from config
+logbook doc <session> --save --commit           # auto git add+commit in the target repo
+logbook doc <session> --prompt-only             # dump the full prompt, skip the LLM call
 ```
 
-Default-Modell ist `qwen3.6:35b-a3b`. Reasoning-Modelle (qwen3,
-deepseek-r1) bekommen `think: false` im Payload — sonst landet die
-ganze Generation im `thinking`-Feld und stdout bleibt leer. Ältere
-Ollama-Versionen ignorieren das Flag; das Tool warnt dann am Ende mit
-Hinweis auf alternative Modelle (z.B. `qwen2.5:7b`, `llama3.1:8b`).
+Default model is `qwen3.6:35b-a3b`. Reasoning models (qwen3, deepseek-r1) get `think: false` in the payload — without that, all generation lands in the `thinking` field and stdout stays empty. If your Ollama version ignores the flag, the tool warns at the end with alternative model suggestions.
 
-`--temperature 0.2` (Default) ist bewusst nüchtern — höher wird
-kreativer und halluzinationsfreudiger, was bei Setup-Dokus selten
-gut tut.
+### Searching and status
 
-### Konfiguration
+```fish
+logbook info                     # dashboard: paths, counts, Ollama reachability
+logbook search apt               # regex over cmd + note across all sessions
+logbook search -c Apt            # case-sensitive
+logbook search --type note <re>  # only notes
+logbook help [subcommand]        # git-style help
+logbook --version
+```
 
-Beim ersten `logbook doc <session>` oder `logbook config edit` legt das
-Tool zwei Dateien an, falls sie noch nicht existieren — beides idempotent,
-bestehende Files werden nie überschrieben:
+`info` makes a 2-second probe against Ollama's `/api/tags` and reports unreachable gracefully. `search` follows grep exit-code convention (0 if matches, 1 otherwise).
+
+### Configuration
+
+On first run of `logbook doc`, two files are created idempotently (never overwritten):
 
 ```
 ~/.config/logbook/config.toml
 ~/.config/logbook/prompts/setup-doc.md
 ```
 
-Die `config.toml` ist eine **auskommentierte** Vorlage; ohne Edit
-bleiben die Hardcode-Defaults aktiv. Auflösungsreihenfolge ist
-**CLI-Flag > config.toml > Default**.
+The `config.toml` is a fully-commented template; without edits, all hardcoded defaults remain active. Resolution order is **CLI flag > config.toml > built-in default**.
 
 Schema:
 
 ```toml
 [llm]
-# model = "qwen3.6:35b-a3b"          # Ollama-Modell
+# model = "qwen3.6:35b-a3b"
 # endpoint = "http://localhost:11434"
 # temperature = 0.2
-# seed = 42                          # für reproduzierbare Generationen
-# default_prompt = "setup-doc"       # Datei unter prompts/<name>.md
-# think = false                      # true = Reasoning der Thinking-Modelle erlauben
+# seed = 42
+# default_prompt = "setup-doc"
+# think = false                  # true to keep reasoning visible
 
 [output]
-# docs_dir = "~/docs/setups"         # Default-Ziel für `--save`
-# auto_commit = false                # implizites git add+commit nach Speichern
+# docs_dir = "~/docs/setups"     # default target for --save
+# auto_commit = false            # implicit git add+commit after save
 
 [filter]
-# extra_noise = ["htop", "tmux "]    # zusätzliche Noise-Strings
+# extra_noise = ["htop", "tmux "]  # entries ending with space are prefix matches
 ```
 
-- `[llm].think` und `[llm].seed` sind bewusst **nur per Config**
-  setzbar, kein CLI-Flag dafür.
-- `--save` ohne Argument nutzt `[output].docs_dir`. Ohne diese
-  Config-Option meldet das Tool einen Fehler. `--save-to DIR` überschreibt
-  den Wert explizit.
-- `auto_commit = true` triggert das gleiche `git add -A && git commit`
-  wie `--commit` — gilt nur, wenn auch wirklich gespeichert wird.
-- `extra_noise`-Einträge **mit trailing space** sind Präfix-Matches
-  (`"tmux "` droppt `tmux attach`, `tmux new` etc.), ohne trailing space
-  exakte Matches (`"htop"` droppt nur `htop` alleine). Greift sowohl
-  in `_record` (live) als auch bei `prune --noise` (retroaktiv).
+Management subcommands:
 
-#### Prompt-Templates
+```fish
+logbook config show              # effective values with source: [config.toml] vs [default]
+logbook config path              # absolute path to config.toml (scriptable)
+logbook config edit              # open config.toml in $EDITOR
+logbook config reset -y          # backup to ~/.config/logbook.bak.<ts>/ and reset
+```
 
-`~/.config/logbook/prompts/<name>.md` ist die Datei, die als
-**System-Prompt** an Ollama geschickt wird. `setup-doc.md` wird beim
-ersten Lauf angelegt — frei editierbar. Zusätzliche Templates einfach
-daneben legen und mit `--prompt <name>` auswählen:
+### Prompt templates
+
+`~/.config/logbook/prompts/<name>.md` is the system prompt sent to Ollama. `setup-doc.md` is bootstrapped on first run; add more templates and select with `--prompt <name>`:
 
 ```fish
 $EDITOR ~/.config/logbook/prompts/runbook.md
 logbook doc my-session --prompt runbook
 ```
 
-#### Config-Subcommands
+### Tab completion
 
-```fish
-logbook config show          # effektive Werte mit Quelle [config.toml] vs [default]
-logbook config path          # absoluter Pfad zur config.toml (scriptable)
-logbook config edit          # config.toml in $VISUAL/$EDITOR
-logbook config reset -y      # Reset mit Backup nach ~/.config/logbook.bak.<ts>/
-```
+Fish completes dynamically:
 
-`reset` legt ein Backup an, *bevor* gelöscht wird; scheitert das Backup,
-passiert nichts. Sessions in `~/.local/share/logbook/` bleiben
-unangetastet (Daten ≠ Einstellungen).
-
-### Status, Suche, Hilfe
-
-```fish
-logbook info                 # Dashboard: Pfade, Counts, Ollama-Reachability
-logbook search apt           # Regex über cmd+note aller Sessions
-logbook search -c Apt        # case-sensitive
-logbook search --type note debian   # nur notes durchsuchen
-logbook help [subcommand]    # git-Style Hilfe
-logbook --version            # logbook 0.5
-```
-
-`info` macht einen 2-Sekunden-Probe via `GET /api/tags` ans Ollama —
-unerreichbar wird sauber als `✗ nicht erreichbar` gemeldet, kein Crash.
-`search` folgt grep-Konvention (exit 0 bei Treffer, exit 1 sonst), mit
-ANSI-Bold-Highlight nur wenn nach stdout ein TTY hängt.
-
-### Tab-Completion
-
-`install.sh` deployed `logbook.completions.fish` nach
-`~/.config/fish/completions/`. Damit ergänzt Fish u.a. dynamisch:
-
-- Session-Namen für `show`/`render`/`doc`/`edit`/`drop`/`prune`/`restore`
-- Prompt-Template-Namen für `--prompt`
-- Installierte Ollama-Modelle für `--model` (ruft `ollama list` auf)
-- `config <show|edit|path|reset>` und alle Top-Level-Subcommands
-
-### Was aufgezeichnet wird
-
-- Ausgeführte Kommandos: `cmd`, `cwd`, `exit`, `ts`, `user`, `host`
-- Optional `tag` am cmd-Event, wenn vorher `logbook tag <wert>` gesetzt war
-- Notes (manuelle Prosa)
-- Sections (werden in `render` zu H2-Überschriften)
-
-### Was **nicht** aufgezeichnet wird
-
-- Kommandos mit führendem Leerzeichen (HISTCONTROL-Konvention) → bewusst Opt-out
-- `logbook` selbst
-- Noise-Liste: `cd`, `ls`, `ll`, `la`, `pwd`, `clear`, `exit`, `logout`, `fg`, `bg`
-- Leere Kommandos
+- Session names for `show`/`render`/`doc`/`edit`/`drop`/`prune`/`restore`
+- Prompt template names for `--prompt`
+- Installed Ollama models for `--model` (via `ollama list`)
+- All subcommands and `config <show|edit|path|reset>` actions
 
 ---
 
-## JSONL direkt editieren
+## What is and isn't captured
 
-Format ist JSONL, eine Zeile pro Event. Direkt editierbar:
+**Captured:**
 
-```fish
-$EDITOR ~/.local/share/logbook/sessions/debian-trixie-setup.jsonl
-# oder bequemer:
-logbook edit
-```
+- Executed commands with `cmd`, `cwd`, `exit code`, `timestamp`, `user`, `host`
+- Optional `tag` on a cmd event (set via `logbook tag` before the command)
+- Notes (manual prose via `logbook note`)
+- Section markers (`logbook section`, become H2 in render)
 
-Zeile löschen = Event entfernt. Komfortabler geht's mit `logbook drop`
-und `logbook prune` (siehe oben).
+**Not captured:**
+
+- Commands with a leading space (HISTCONTROL convention) — explicit opt-out
+- The `logbook` command itself
+- The hardcoded noise list: `cd`, `ls`, `ll`, `la`, `pwd`, `clear`, `exit`, `logout`, `fg`, `bg`
+- Anything matching `[filter].extra_noise` from config
 
 ---
 
-## Verzeichnislayout
+## Storage layout
 
 ```
 ~/.local/share/logbook/
-├── active                       # Name der aktiven Session (absent = off)
-├── last                         # zuletzt aktive Session (für `logbook on`)
-├── pending_tag                  # one-shot Tag fürs nächste cmd-Event (absent = none)
+├── active                       # active session name (absent = recording off)
+├── last                         # last active session (for `logbook on`)
+├── pending_tag                  # one-shot tag for next cmd event
 └── sessions/
-    ├── <name>.jsonl             # die Logs
-    └── <name>.jsonl.bak         # Backup von drop/prune, via `logbook restore` zurück
+    ├── <name>.jsonl             # the log
+    └── <name>.jsonl.bak         # backup, restored by `logbook restore`
 
 ~/.config/logbook/
-├── config.toml                  # auskommentierte Vorlage, beim 1. doc / config edit angelegt
+├── config.toml                  # commented template, created on first doc / config edit
 └── prompts/
-    └── <name>.md                # System-Prompt-Templates (setup-doc.md initial)
+    └── <name>.md                # system-prompt templates
 ```
 
-Pfade respektieren `$XDG_DATA_HOME` und `$XDG_CONFIG_HOME`.
+Both paths respect `$XDG_DATA_HOME` and `$XDG_CONFIG_HOME`.
 
 ---
 
-## Ehrliche Trade-offs / Limits
+## Honest limitations
 
-- **Sync-Recording.** Jedes Kommando triggert einen ~50ms Python-Start.
-  Auf der Dell Precision 7760 kaum spürbar; auf langsameren Hosts
-  potenziell ein Wahrnehmungs-Issue. Async-Variante (`& disown`) ist
-  möglich, birgt aber Race-Conditions bei schnellen Kommandos in Folge —
-  bewusst sync gelassen.
-- **`$status` nach Pipes.** Fish liefert standardmäßig den Status des
-  letzten Pipe-Befehls. Wenn dir das matters: einzeln laufen lassen oder
-  `$pipestatus` selber inspizieren und nachpflegen.
-- **`sudo`-cwd.** `cwd` ist das Working-Dir der aufrufenden Shell, nicht
-  von root. In der Regel egal.
-- **Sensible Daten.** Passwörter in Kommandozeilen werden mitgeloggt
-  (z.B. `mysql -p PASS`). Workaround: führendes Leerzeichen verwenden,
-  oder hinterher in der JSONL editieren (`logbook edit`).
-- **Multi-line Kommandos.** Newlines werden im JSON escaped (`\n`), in
-  `render` als ein Codeblock dargestellt. Funktioniert, ist aber etwas
-  sperrig zu lesen.
-- **LLM-Qualität.** `qwen3.6:35b-a3b` ist ein MoE-Modell, läuft auf
-  8 GB VRAM mit CPU-Offload (~6-12 t/s erwartet). Realistisch: kleine
-  Sessions (< 10 Befehle) tendieren zum Halluzinieren, gut strukturierte
-  Sessions mit Sections und Notes liefern verwertbares Material. Für
-  größere Dokus `--prompt-only` und Output in ein Cloud-Modell pasten.
-- **`--commit` ist breit.** Mit `--save-to ... --commit` macht das Tool
-  ein `git add -A` im erkannten Repo — committet also auch andere
-  unstaged Änderungen. Wenn dich das stört, manuell stagen und committen
-  statt `--commit`.
-- **`--bak` ist Single-Level.** Jedes neue `drop`/`prune` überschreibt
-  die bestehende Backup-Datei. Mehrfach-Undo gibt es nicht; wenn du es
-  brauchst: vorher die `.jsonl.bak` woanders hin kopieren.
+- **Synchronous recording.** Every command triggers a ~50 ms Python startup. Barely noticeable on a modern workstation; potentially visible on older hardware. An async variant would risk race conditions with rapid command sequences, so this is deliberate.
+- **`$status` after pipes.** Fish reports the status of the last pipe stage by default. If pipeline status matters, run stages separately or inspect `$pipestatus` manually.
+- **`sudo` cwd.** The recorded `cwd` is the calling shell's, not root's. Usually fine.
+- **Secrets in command lines.** Passwords passed on the command line (`mysql -p PASS`, `curl -u user:pass`) are recorded as-is. Use a leading space to skip recording, or edit them out afterward with `logbook edit`.
+- **Multi-line commands.** Newlines are JSON-escaped (`\n`) and rendered as a single code block. Functional but a bit cramped to read.
+- **LLM quality varies.** Small sessions (< 10 commands) tend to hallucinate. Sessions with clear sections and notes produce usable output. For larger work, `--prompt-only` and paste into a cloud model.
+- **`--commit` is broad.** `--save-to ... --commit` does `git add -A` in the target repo — other unstaged changes get committed too. Manual staging is safer if that matters.
+- **Single-level backup.** Each new `drop`/`prune` overwrites the existing `.bak`. No multi-step undo.
 
 ---
 
-## Roadmap
+## Project status
 
-| Schritt | Inhalt |
-|---|---|
-| 1 ✅ | MVP: Recording, JSONL, render |
-| 2 ✅ | `edit`, `drop` (id/range), `prune --failed/--noise`, `tag`, `restore` |
-| 3 ✅ | Ollama-Integration (`logbook doc`) — Streaming, `--save-to`, `--commit` |
-| 4 ✅ | Config (`~/.config/logbook/config.toml`) + Prompt-Templates, `--prompt`, `--save`, `auto_commit`, `extra_noise` |
-| 4.5 ✅ | UX-Polish: `info`, `search`, `config show/edit/path/reset`, `help`, `--version`, Fish Tab-Completion |
-| 4.6 | Zusätzliche Prompt-Templates: `runbook.md`, `ansible-skeleton.md` |
-| 5 ✗ | Cloud-Backend — gestrichen, lokales Ollama reicht |
+Personal tool, used in production for the author's own consulting work. Stable feature-wise as of v0.5. Open to issues and bug reports; PRs welcome but not solicited.
 
-Siehe `CLAUDE.md` für Architektur-Notizen und Entwicklungs-Constraints
-zur Weiterarbeit mit Claude Code.
+**Planned:**
+
+- Additional prompt templates (`runbook.md`, `ansible-skeleton.md`)
+
+**Explicitly not planned:**
+
+- Cloud LLM backends (Anthropic, OpenAI). Local Ollama covers the use case.
+- bash or zsh support. Fish-only is a feature.
+- TUI / web UI / daemon. CLI is the right interface.
 
 ---
 
-## Lizenz
+## Development notes
 
-Privat / unkommerziell, keine explizite Lizenz nötig. Mach was Sinn macht.
+The tool was developed iteratively with substantial AI assistance (Claude Opus 4.7 via Claude Code). Commits tagged with `[ai: <model>]` denote AI-assisted contributions; `Co-Authored-By: Claude Opus 4.7` appears in commit messages where significant code was generated.
+
+The project root contains a `CLAUDE.md` file describing architecture, design constraints, and roadmap — used by Claude Code as project context but also useful as a high-level engineering overview for human readers.
+
+To contribute or extend:
+
+1. Read `CLAUDE.md` first — the design constraints (stdlib only, single-file, atomic file ops, German user-facing prose) are non-negotiable
+2. Maintain the `CLAUDE.md` "Aktueller Stand" section as features land
+3. Keep commits small and rebase before merging
+
+---
+
+## License
+
+MIT. See `LICENSE`.

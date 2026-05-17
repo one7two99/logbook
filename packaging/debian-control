@@ -1,0 +1,17 @@
+Section: utils
+Priority: optional
+Standards-Version: 4.6.0
+
+Package: logbook
+Version: 0.5
+Maintainer: One7Two99 <one7two99@gmail.com>
+Architecture: all
+Depends: python3 (>= 3.11), fish
+Description: Install logbook recorder for fish shell
+ Records executed shell commands, prose notes and section markers
+ to JSONL, renders to Markdown, and optionally generates documentation
+ via a local Ollama instance.
+Files: logbook /usr/bin/
+ logbook.fish /etc/fish/conf.d/
+ logbook.completions.fish /usr/share/fish/vendor_completions.d/
+ logbook.1.gz /usr/share/man/man1/
