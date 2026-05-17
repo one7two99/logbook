@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""
-logbook — install logbook recorder.
+"""logbook — install logbook recorder.
 
 Records executed shell commands, prose notes and section markers to JSONL,
-renders to Markdown. LLM integration follows in step 3.
+renders to Markdown, and generates documentation via local Ollama or
+user-edited prompt templates. Configuration in TOML, fish-shell integration.
+
+See CLAUDE.md for full architecture and design constraints.
 
 Storage layout (XDG):
-  $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
-    active            — file containing active session name (absent = off)
-    last              — last active session name (for `logbook on`)
-    sessions/<n>.jsonl — the log
+  $XDG_DATA_HOME/logbook/        (default: ~/.local/share/logbook/)
+    active                — active session name (absent = off)
+    last                  — last active session name (for `logbook on`)
+    pending_tag           — one-shot tag for next cmd event (absent = none)
+    sessions/<n>.jsonl    — the log
+    sessions/<n>.jsonl.bak — backup written by drop/prune, restored by `restore`
+
+  $XDG_CONFIG_HOME/logbook/      (default: ~/.config/logbook/)
+    config.toml           — auto-created skeleton, fully commented (= defaults)
+    prompts/<name>.md     — system-prompt templates for `logbook doc`
 
 Event types in JSONL:
   {"ts":"...","type":"init","name":"...","host":"...","user":"..."}
@@ -37,6 +45,8 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+__version__ = "0.5"
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -132,6 +142,30 @@ DEFAULT_CONFIG_TOML = """\
 # → "htop" exakt droppen, "tmux ..." per Prefix.
 # extra_noise = []
 """
+
+# Bekannte Config-Keys mit Hardcode-Defaults. `config show` rendert daraus,
+# build_parser zieht die Defaults via config_get. Hier zentral, damit Schema
+# und tatsächliche Lookups nicht auseinanderlaufen können. Default-Value
+# = None bedeutet "kein Built-in-Default" — der Lookup-Pfad ist dann
+# ausschließlich Config-getrieben (z.B. docs_dir).
+CONFIG_SCHEMA: list[tuple[str, list[tuple[str, object]]]] = [
+    ("llm", [
+        ("model", "qwen3.6:35b-a3b"),
+        ("endpoint", "http://localhost:11434"),
+        ("temperature", 0.2),
+        ("seed", 42),
+        ("default_prompt", "setup-doc"),
+        ("think", False),
+    ]),
+    ("output", [
+        ("docs_dir", None),
+        ("auto_commit", False),
+    ]),
+    ("filter", [
+        ("extra_noise", []),
+    ]),
+]
+
 
 # ---------------------------------------------------------------------------
 # Config loading (cached, lazy, never crashes)
@@ -932,6 +966,258 @@ def cmd_doc(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# `logbook help [topic]` — Closure-Factory: cmd_help braucht Zugriff auf
+# parser + subparsers, ohne dass wir sie als globale Variablen herumschleppen.
+
+def make_cmd_help(parser: argparse.ArgumentParser, sub):
+    def cmd_help(args) -> int:
+        if not args.topic:
+            parser.print_help()
+            return 0
+        if args.topic in sub.choices:
+            sub.choices[args.topic].print_help()
+            return 0
+        avail = sorted(sub.choices.keys())
+        print(
+            f"unknown subcommand: {args.topic!r}\n"
+            f"available: {', '.join(avail)}",
+            file=sys.stderr,
+        )
+        return 1
+    return cmd_help
+
+
+# ---------------------------------------------------------------------------
+# `logbook config show|edit|path|reset`
+
+def _fmt_toml_value(v) -> str:
+    """TOML-ähnliche Wertedarstellung für `config show`."""
+    if v is None:
+        return "(not set)"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return f'"{v}"'
+    if isinstance(v, list):
+        return "[" + ", ".join(_fmt_toml_value(x) for x in v) + "]"
+    return str(v)
+
+
+def cmd_config_show(args) -> int:
+    cfg = load_config()
+    cfg_exists = CONFIG_FILE.exists()
+    longest = max(len(k) for _, keys in CONFIG_SCHEMA for k, _ in keys)
+    val_col = max(
+        len(_fmt_toml_value(cfg.get(sec, {}).get(k, default)))
+        for sec, keys in CONFIG_SCHEMA
+        for k, default in keys
+    )
+
+    for section, keys in CONFIG_SCHEMA:
+        print(f"[{section}]")
+        sec_dict = cfg.get(section) if isinstance(cfg.get(section), dict) else {}
+        for key, default in keys:
+            if key in sec_dict:
+                value = sec_dict[key]
+                source = "[config.toml]"
+            else:
+                value = default
+                source = "[default]"
+            v = _fmt_toml_value(value)
+            print(f"  {key:<{longest}}  = {v:<{val_col}}    {source}")
+        print()
+
+    print(f"config.toml: {CONFIG_FILE}{'' if cfg_exists else '  (nicht angelegt)'}")
+    if PROMPTS_DIR.exists():
+        tpls = sorted(p.stem for p in PROMPTS_DIR.glob("*.md"))
+        suffix = f"  ({len(tpls)} template{'s' if len(tpls) != 1 else ''}"
+        if tpls:
+            suffix += f": {', '.join(tpls)}"
+        suffix += ")"
+        print(f"prompts:     {PROMPTS_DIR}{suffix}")
+    else:
+        print(f"prompts:     {PROMPTS_DIR}  (nicht angelegt)")
+    if not cfg_exists:
+        print()
+        print("Hinweis: config.toml existiert noch nicht — `logbook doc` legt sie")
+        print("beim ersten Lauf an, oder direkt `logbook config edit`.")
+    return 0
+
+
+def cmd_config_edit(args) -> int:
+    # Damit der Editor was zum Editieren findet, vorher idempotent anlegen.
+    ensure_config_files()
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    argv = shlex.split(editor) + [str(CONFIG_FILE)]
+    try:
+        return subprocess.run(argv).returncode
+    except FileNotFoundError:
+        print(f"editor not found: {argv[0]}", file=sys.stderr)
+        return 1
+
+
+def cmd_config_path(args) -> int:
+    print(CONFIG_FILE)
+    return 0
+
+
+def cmd_config_reset(args) -> int:
+    if not XDG_CONFIG.exists():
+        print(f"{XDG_CONFIG} existiert nicht — nichts zu tun")
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "reset benötigt --yes wenn nicht interaktiv",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"löscht {XDG_CONFIG} (Backup wird angelegt). weiter? [y/N] ", end="", flush=True)
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes", "j", "ja"):
+            print("abgebrochen")
+            return 0
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    backup = XDG_CONFIG.parent / f"logbook.bak.{ts}"
+    try:
+        # shutil.move = atomarer rename auf demselben Filesystem; falls das
+        # Backup-Ziel nicht erstellt werden kann, lieber abbrechen als
+        # halbgaren Zustand zu hinterlassen.
+        shutil.move(str(XDG_CONFIG), str(backup))
+    except OSError as e:
+        print(f"backup failed, nichts gelöscht: {e}", file=sys.stderr)
+        return 1
+    print(f"backup: {backup}")
+    print(f"reset:  {XDG_CONFIG} entfernt")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# `logbook info` — Status-Dashboard
+
+def _ollama_models(endpoint: str, timeout: float = 2.0) -> list[str] | None:
+    """GET <endpoint>/api/tags. None bei jedem Fehler (Timeout, refused,
+    HTTP-Error, Garbage). Kein Stacktrace, kein Exit != 0."""
+    url = f"{endpoint.rstrip('/')}/api/tags"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError, TimeoutError):
+        return None
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        return []
+    out: list[str] = []
+    for m in models:
+        if isinstance(m, dict) and isinstance(m.get("name"), str):
+            out.append(m["name"])
+    return out
+
+
+def cmd_info(args) -> int:
+    print(f"logbook {__version__}")
+    print()
+
+    active = get_active()
+    if active:
+        ap = session_path(active)
+        try:
+            n = sum(1 for line in ap.open(encoding="utf-8") if line.strip()) if ap.exists() else 0
+        except OSError:
+            n = 0
+        print(f"Active session:  {active}  ({n} events)")
+        print(f"                 {ap}")
+    else:
+        print("Active session:  (none)")
+    print()
+
+    print("Paths:")
+    print(f"  data:          {XDG_DATA}")
+    print(f"  config:        {XDG_CONFIG}")
+    sess_count = len(list(SESSIONS.glob("*.jsonl"))) if SESSIONS.exists() else 0
+    print(f"  sessions:      {SESSIONS}  ({sess_count} session{'s' if sess_count != 1 else ''})")
+    tpl_count = len(list(PROMPTS_DIR.glob("*.md"))) if PROMPTS_DIR.exists() else 0
+    print(f"  prompts:       {PROMPTS_DIR}  ({tpl_count} template{'s' if tpl_count != 1 else ''})")
+    print()
+
+    endpoint = str(config_get("llm", "endpoint", "http://localhost:11434"))
+    models = _ollama_models(endpoint)
+    if models is None:
+        print(f"Ollama:          {endpoint}  ✗ nicht erreichbar")
+    else:
+        print(f"Ollama:          {endpoint}  ✓ erreichbar")
+        if models:
+            preview = ", ".join(models[:5])
+            extra = f" (+{len(models) - 5} weitere)" if len(models) > 5 else ""
+            print(f"  Modelle:       {preview}{extra}  ({len(models)} installiert)")
+        else:
+            print("  Modelle:       (keine installiert)")
+    print()
+
+    if CONFIG_FILE.exists():
+        print(f"Config:          {CONFIG_FILE}  ✓ existiert")
+        print("  Aktive Werte:  `logbook config show`")
+    else:
+        print(f"Config:          {CONFIG_FILE}  (nicht angelegt)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# `logbook search <pattern>` — grep über alle Sessions
+
+def _ansi_highlight(s: str, match_re: re.Pattern, on: bool) -> str:
+    if not on:
+        return s
+    return match_re.sub(lambda m: f"\033[1m{m.group(0)}\033[0m", s)
+
+
+def cmd_search(args) -> int:
+    flags = 0 if args.case_sensitive else re.IGNORECASE
+    try:
+        pat = re.compile(args.pattern, flags)
+    except re.error as e:
+        print(f"invalid regex: {e}", file=sys.stderr)
+        return 2
+    if not SESSIONS.exists():
+        return 1
+
+    types_wanted = {args.type} if args.type else {"cmd", "note"}
+    highlight = sys.stdout.isatty()
+    hits = 0
+    for sp in sorted(SESSIONS.glob("*.jsonl")):
+        name = sp.stem
+        try:
+            with sp.open(encoding="utf-8") as f:
+                for i, raw in enumerate(f, start=1):
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    t = ev.get("type")
+                    if t not in types_wanted:
+                        continue
+                    content = ev.get("cmd") if t == "cmd" else ev.get("text")
+                    if not isinstance(content, str):
+                        continue
+                    if not pat.search(content):
+                        continue
+                    ts = ev.get("ts", "")
+                    out = _ansi_highlight(content, pat, highlight)
+                    print(f"{name}:{i}  {ts}  {t:<4}  {out}")
+                    hits += 1
+        except OSError:
+            continue
+    return 0 if hits else 1
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 
 def build_parser() -> argparse.ArgumentParser:
@@ -939,7 +1225,13 @@ def build_parser() -> argparse.ArgumentParser:
         prog="logbook",
         description="Install-Logbook recorder. Captures CLI commands, notes, and sections to JSONL.",
     )
-    sub = p.add_subparsers(dest="cmd", required=True, metavar="<command>")
+    p.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"logbook {__version__}",
+    )
+    # required=False: bares `logbook` druckt Hilfe (siehe main).
+    sub = p.add_subparsers(dest="cmd", metavar="<command>")
 
     s = sub.add_parser("init", help="start a new session and activate it")
     s.add_argument("name", help="session name (A-Z a-z 0-9 . _ -)")
@@ -1032,6 +1324,31 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--prompt-only", action="store_true", help="nur System+User-Prompt drucken, kein LLM-Call")
     s.set_defaults(func=cmd_doc)
 
+    s = sub.add_parser("info", help="status dashboard (paths, ollama, config)")
+    s.set_defaults(func=cmd_info)
+
+    s = sub.add_parser("search", help="grep über cmd+note Felder aller Sessions")
+    s.add_argument("pattern", help="regex (default case-insensitive)")
+    s.add_argument("--case-sensitive", "-c", action="store_true", help="case-sensitive match")
+    s.add_argument("--type", choices=["cmd", "note"], help="nur diesen Event-Typ durchsuchen")
+    s.set_defaults(func=cmd_search)
+
+    s = sub.add_parser("config", help="manage logbook configuration")
+    csub = s.add_subparsers(dest="config_cmd", required=True, metavar="<action>")
+    cs = csub.add_parser("show", help="effective config dumpen, mit Quelle pro Wert")
+    cs.set_defaults(func=cmd_config_show)
+    ce = csub.add_parser("edit", help="config.toml im $EDITOR öffnen")
+    ce.set_defaults(func=cmd_config_edit)
+    cp = csub.add_parser("path", help="absoluten Pfad zur config.toml drucken")
+    cp.set_defaults(func=cmd_config_path)
+    cr = csub.add_parser("reset", help="config.toml + prompts/ löschen (mit Backup)")
+    cr.add_argument("-y", "--yes", action="store_true", help="ohne Rückfrage")
+    cr.set_defaults(func=cmd_config_reset)
+
+    s = sub.add_parser("help", help="show help (optional: for a specific subcommand)")
+    s.add_argument("topic", nargs="?", help="subcommand name")
+    s.set_defaults(func=make_cmd_help(p, sub))
+
     # Internal — called by the fish hook
     s = sub.add_parser("_record", help=argparse.SUPPRESS)
     s.add_argument("--exit-code", type=int, default=0)
@@ -1045,6 +1362,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    if not args.cmd:
+        parser.print_help()
+        return 0
     return args.func(args) or 0
 
 

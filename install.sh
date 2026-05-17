@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BIN_DIR="${HOME}/.local/bin"
 FISH_CONF="${XDG_CONFIG_HOME:-${HOME}/.config}/fish/conf.d"
+FISH_COMP="${XDG_CONFIG_HOME:-${HOME}/.config}/fish/completions"
 DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/logbook"
 
 # --- sanity checks
@@ -26,6 +27,11 @@ install -m 0755 "${SCRIPT_DIR}/logbook" "${BIN_DIR}/logbook"
 echo "→ Installing fish hook to ${FISH_CONF}/logbook.fish"
 mkdir -p "$FISH_CONF"
 install -m 0644 "${SCRIPT_DIR}/logbook.fish" "${FISH_CONF}/logbook.fish"
+
+# --- install fish completions
+echo "→ Installing fish completions to ${FISH_COMP}/logbook.fish"
+mkdir -p "$FISH_COMP"
+install -m 0644 "${SCRIPT_DIR}/logbook.completions.fish" "${FISH_COMP}/logbook.fish"
 
 # --- create data dir
 echo "→ Creating data dir ${DATA_DIR}/sessions"

@@ -17,7 +17,7 @@ Stack hinaus — Pragmatismus vor Generalität.
 
 ---
 
-## Aktueller Stand (MVP — Schritte 1+2+3+4, ✅ done)
+## Aktueller Stand (MVP — Schritte 1+2+3+4+4.5, ✅ done)
 
 **Schritt 1 — Recording + Render:**
 - Python 3 single-file binary (`logbook`), **stdlib only**, kein pip
@@ -59,9 +59,31 @@ Stack hinaus — Pragmatismus vor Generalität.
 - Neue `doc`-Flags: `--prompt NAME`, `--save` (nutzt `[output].docs_dir`)
 - `[llm].think` und `[llm].seed` sind bewusst **Config-only** (kein CLI-Flag)
 
+**Schritt 4.5 — UX-Polish:**
+- Bare `logbook` druckt Hilfe (exit 0, kein argparse-Error)
+- `--version` / `-V` Flag (`__version__ = "0.5"` als Modul-Konstante)
+- `help [subcommand]` Subcommand (git-Style; Closure-Factory greift auf
+  Parser+Subparsers zu, kein Globalmüll)
+- `config show|edit|path|reset` Subcommand-Family
+  - `show`: rendert `CONFIG_SCHEMA` mit Quelle pro Wert (`[config.toml]`
+    vs `[default]`)
+  - `reset -y`: atomares `shutil.move(XDG_CONFIG, logbook.bak.<ts>)` —
+    Backup-First, falls Backup scheitert wird nichts gelöscht
+- `info` — Status-Dashboard: Active Session, Pfade mit Counts,
+  Ollama-Reachability (GET `/api/tags`, 2s Timeout, graceful degradation),
+  Config-Status
+- `search <pattern>` — Regex über `cmd` + `note` Felder aller Sessions.
+  Default: case-insensitive, beide Typen. Exit 0 bei Treffern, 1 sonst
+  (grep-Konvention). ANSI-Bold nur auf TTY.
+- Fish Tab-Completion (`logbook.completions.fish`): Sessions, Prompts,
+  Ollama-Modelle dynamisch; `install.sh` deployed nach
+  `~/.config/fish/completions/`
+- `CONFIG_SCHEMA`: zentrale Liste aller bekannten Keys mit Defaults —
+  `config show` und `build_parser`-Defaults beide daran orientiert
+
 **Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
 `tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
-`doc`, intern `_record`
+`doc`, `config`, `info`, `search`, `help`, intern `_record`
 
 ---
 
@@ -163,7 +185,7 @@ $XDG_CONFIG_HOME/logbook/  (default: ~/.config/logbook/)
 
 ## Nächste Schritte (Priorität absteigend)
 
-### Schritt 4.5 — Zusätzliche Prompt-Templates
+### Schritt 4.6 — Zusätzliche Prompt-Templates
 
 - `runbook.md` — Schritt-für-Schritt-Operations-Anleitung für wiederholte
   Maintenance-Tasks (z.B. Service-Migration, Backup-Cycle)
@@ -175,14 +197,11 @@ $XDG_CONFIG_HOME/logbook/  (default: ~/.config/logbook/)
 - Die System-Prompt-Konstante `DOC_SYSTEM_PROMPT` im Script bleibt als
   Last-Resort-Fallback bestehen — nicht löschen
 
-### Schritt 5 — Cloud-Backend
+### Schritt 5 — Cloud-Backend (gestrichen)
 
-- Anthropic API als zweites Backend, gewählt via `[llm].backend = "anthropic"`
-  oder `--backend anthropic`
-- Key aus Env (`ANTHROPIC_API_KEY`), niemals aus der Config (zu leicht
-  versehentlich committed)
-- Bei MoE-Renders empfiehlt sich sowieso oft das Cloud-Modell für
-  größere Dokus
+Cloud-Backend wird nicht implementiert. Lokales Ollama deckt alle
+Use-Cases ab. Entscheidung dokumentiert für zukünftige Iterationen,
+damit nicht erneut diskutiert.
 
 ---
 
@@ -217,6 +236,7 @@ Keine Tests im MVP. Falls du eine Suite hinzufügst:
 |---|---|
 | `logbook` | Hauptscript (Python 3, stdlib only). Wird nach `~/.local/bin/` installiert. |
 | `logbook.fish` | Fish-Hook (`fish_postexec`). Wird nach `~/.config/fish/conf.d/` installiert. |
+| `logbook.completions.fish` | Fish Tab-Completions. Wird nach `~/.config/fish/completions/` installiert. |
 | `install.sh` | Installer (bash). One-shot. |
 | `README.md` | User-Doku (DE). |
 | `CLAUDE.md` | Dieses File. |
