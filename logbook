@@ -12,8 +12,8 @@ Storage layout (XDG):
     active                — active session name (absent = off)
     last                  — last active session name (for `logbook on`)
     pending_tag           — one-shot tag for next cmd event (absent = none)
-    sessions/<n>.jsonl    — the log
-    sessions/<n>.jsonl.bak — backup written by drop/prune, restored by `restore`
+    sessions/<name>.jsonl    — the log
+    sessions/<name>.jsonl.bak — backup written by drop/prune, restored by `restore`
 
   $XDG_CONFIG_HOME/logbook/      (default: ~/.config/logbook/)
     config.toml           — auto-created skeleton, fully commented (= defaults)
@@ -977,7 +977,7 @@ def make_cmd_help(parser: argparse.ArgumentParser, sub):
         if args.topic in sub.choices:
             sub.choices[args.topic].print_help()
             return 0
-        avail = sorted(sub.choices.keys())
+        avail = sorted(name for name in sub.choices.keys() if not name.startswith("_"))
         print(
             f"unknown subcommand: {args.topic!r}\n"
             f"available: {', '.join(avail)}",
