@@ -1,4 +1,7 @@
 __pycache__/
 *.pyc
 .claude/
-info.txt
+# exclude .deb build artifacts
+*.deb
+*.changes
+*.buildinfo
