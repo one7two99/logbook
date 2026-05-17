@@ -63,7 +63,7 @@ No other runtime dependencies.
 ## Installation
 
 ```bash
-git clone https://github.com/<you>/logbook.git
+git clone https://github.com/one7two99/logbook.git
 cd logbook
 ./install.sh
 ```
