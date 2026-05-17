@@ -53,9 +53,10 @@ Stack hinaus — Pragmatismus vor Generalität.
 - `extra_noise`-Konvention: Einträge mit trailing space = Prefix-Match,
   sonst exact; gilt sowohl für `_record` als auch für `prune --noise`
 - Prompt-Templates in `$XDG_CONFIG_HOME/logbook/prompts/<name>.md`
-- Erster `logbook doc`-Aufruf schreibt idempotent eine **auskommentierte**
-  `config.toml` (Defaults bleiben aktiv, Datei ist Editier-Vorlage) und
-  `prompts/setup-doc.md`. Niemals existierende Files überschreiben.
+- Erster `logbook doc` oder `logbook config edit` schreibt idempotent
+  eine **auskommentierte** `config.toml` (Defaults bleiben aktiv, Datei
+  ist Editier-Vorlage) und `prompts/setup-doc.md`. Bestehende Files
+  werden nie überschrieben.
 - Neue `doc`-Flags: `--prompt NAME`, `--save` (nutzt `[output].docs_dir`)
 - `[llm].think` und `[llm].seed` sind bewusst **Config-only** (kein CLI-Flag)
 
@@ -109,7 +110,7 @@ $XDG_DATA_HOME/logbook/   (default: ~/.local/share/logbook/)
     └── <name>.jsonl.bak # backup, written by drop/prune, restored by `restore`
 
 $XDG_CONFIG_HOME/logbook/  (default: ~/.config/logbook/)
-├── config.toml         # auto-erstellt beim ersten `doc`, auskommentierte Vorlage
+├── config.toml         # auto-erstellt beim ersten `doc` oder `config edit`, auskommentiert
 └── prompts/
     └── <name>.md       # System-Prompt-Templates (setup-doc.md beim Bootstrap)
 ```

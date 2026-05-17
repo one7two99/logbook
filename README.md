@@ -1,9 +1,11 @@
 # logbook — Install-Logbook für Debian-Setups
 
-MVP-Stand (Schritte 1+2+3+4). Erfasst ausgeführte Kommandos, Notes und
-Section-Marker in JSONL, rendert nach Markdown und kann die Session über
-ein lokales Ollama in eine Setup-Doku verwandeln. Verhalten ist über
-`~/.config/logbook/config.toml` und Prompt-Templates anpassbar.
+MVP-Stand (Schritte 1+2+3+4+4.5). Erfasst ausgeführte Kommandos, Notes
+und Section-Marker in JSONL, rendert nach Markdown und kann die Session
+über ein lokales Ollama in eine Setup-Doku verwandeln. Verhalten ist
+über `~/.config/logbook/config.toml` und Prompt-Templates anpassbar,
+Daily-Use-Subcommands (`info`, `search`, `config`, `help`) plus Fish
+Tab-Completion.
 
 Single-File Python 3 + Fish-Hook, **keine externen Abhängigkeiten** (stdlib only).
 
@@ -19,8 +21,9 @@ Macht:
 
 1. Kopiert `logbook` nach `~/.local/bin/logbook` (0755)
 2. Kopiert `logbook.fish` nach `~/.config/fish/conf.d/logbook.fish` (0644)
-3. Legt `~/.local/share/logbook/sessions/` an
-4. Prüft `python3 >= 3.11` und ob `~/.local/bin` im `$PATH` ist
+3. Kopiert `logbook.completions.fish` nach `~/.config/fish/completions/logbook.fish` (0644)
+4. Legt `~/.local/share/logbook/sessions/` an
+5. Prüft `python3 >= 3.11` und ob `~/.local/bin` im `$PATH` ist
 
 Danach: **neue Fish-Session öffnen** (oder `source ~/.config/fish/conf.d/logbook.fish`).
 
@@ -110,9 +113,9 @@ gut tut.
 
 ### Konfiguration
 
-Beim ersten `logbook doc <session>` legt das Tool zwei Dateien an, falls
-sie noch nicht existieren — beides idempotent, bestehende Files werden
-nie überschrieben:
+Beim ersten `logbook doc <session>` oder `logbook config edit` legt das
+Tool zwei Dateien an, falls sie noch nicht existieren — beides idempotent,
+bestehende Files werden nie überschrieben:
 
 ```
 ~/.config/logbook/config.toml
@@ -166,6 +169,45 @@ $EDITOR ~/.config/logbook/prompts/runbook.md
 logbook doc my-session --prompt runbook
 ```
 
+#### Config-Subcommands
+
+```fish
+logbook config show          # effektive Werte mit Quelle [config.toml] vs [default]
+logbook config path          # absoluter Pfad zur config.toml (scriptable)
+logbook config edit          # config.toml in $VISUAL/$EDITOR
+logbook config reset -y      # Reset mit Backup nach ~/.config/logbook.bak.<ts>/
+```
+
+`reset` legt ein Backup an, *bevor* gelöscht wird; scheitert das Backup,
+passiert nichts. Sessions in `~/.local/share/logbook/` bleiben
+unangetastet (Daten ≠ Einstellungen).
+
+### Status, Suche, Hilfe
+
+```fish
+logbook info                 # Dashboard: Pfade, Counts, Ollama-Reachability
+logbook search apt           # Regex über cmd+note aller Sessions
+logbook search -c Apt        # case-sensitive
+logbook search --type note debian   # nur notes durchsuchen
+logbook help [subcommand]    # git-Style Hilfe
+logbook --version            # logbook 0.5
+```
+
+`info` macht einen 2-Sekunden-Probe via `GET /api/tags` ans Ollama —
+unerreichbar wird sauber als `✗ nicht erreichbar` gemeldet, kein Crash.
+`search` folgt grep-Konvention (exit 0 bei Treffer, exit 1 sonst), mit
+ANSI-Bold-Highlight nur wenn nach stdout ein TTY hängt.
+
+### Tab-Completion
+
+`install.sh` deployed `logbook.completions.fish` nach
+`~/.config/fish/completions/`. Damit ergänzt Fish u.a. dynamisch:
+
+- Session-Namen für `show`/`render`/`doc`/`edit`/`drop`/`prune`/`restore`
+- Prompt-Template-Namen für `--prompt`
+- Installierte Ollama-Modelle für `--model` (ruft `ollama list` auf)
+- `config <show|edit|path|reset>` und alle Top-Level-Subcommands
+
 ### Was aufgezeichnet wird
 
 - Ausgeführte Kommandos: `cmd`, `cwd`, `exit`, `ts`, `user`, `host`
@@ -209,7 +251,7 @@ und `logbook prune` (siehe oben).
     └── <name>.jsonl.bak         # Backup von drop/prune, via `logbook restore` zurück
 
 ~/.config/logbook/
-├── config.toml                  # auskommentierte Vorlage, beim 1. doc angelegt
+├── config.toml                  # auskommentierte Vorlage, beim 1. doc / config edit angelegt
 └── prompts/
     └── <name>.md                # System-Prompt-Templates (setup-doc.md initial)
 ```
@@ -240,7 +282,7 @@ Pfade respektieren `$XDG_DATA_HOME` und `$XDG_CONFIG_HOME`.
   8 GB VRAM mit CPU-Offload (~6-12 t/s erwartet). Realistisch: kleine
   Sessions (< 10 Befehle) tendieren zum Halluzinieren, gut strukturierte
   Sessions mit Sections und Notes liefern verwertbares Material. Für
-  größere Dokus später Cloud-Backend (Schritt 5).
+  größere Dokus `--prompt-only` und Output in ein Cloud-Modell pasten.
 - **`--commit` ist breit.** Mit `--save-to ... --commit` macht das Tool
   ein `git add -A` im erkannten Repo — committet also auch andere
   unstaged Änderungen. Wenn dich das stört, manuell stagen und committen
@@ -259,8 +301,9 @@ Pfade respektieren `$XDG_DATA_HOME` und `$XDG_CONFIG_HOME`.
 | 2 ✅ | `edit`, `drop` (id/range), `prune --failed/--noise`, `tag`, `restore` |
 | 3 ✅ | Ollama-Integration (`logbook doc`) — Streaming, `--save-to`, `--commit` |
 | 4 ✅ | Config (`~/.config/logbook/config.toml`) + Prompt-Templates, `--prompt`, `--save`, `auto_commit`, `extra_noise` |
-| 4.5  | Zusätzliche Prompt-Templates: `runbook.md`, `ansible-skeleton.md` |
-| 5    | Cloud-Backend (Anthropic API) als zweites Backend |
+| 4.5 ✅ | UX-Polish: `info`, `search`, `config show/edit/path/reset`, `help`, `--version`, Fish Tab-Completion |
+| 4.6 | Zusätzliche Prompt-Templates: `runbook.md`, `ansible-skeleton.md` |
+| 5 ✗ | Cloud-Backend — gestrichen, lokales Ollama reicht |
 
 Siehe `CLAUDE.md` für Architektur-Notizen und Entwicklungs-Constraints
 zur Weiterarbeit mit Claude Code.
