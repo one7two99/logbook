@@ -142,6 +142,39 @@ logbook doc <session> --prompt-only             # dump the full prompt, skip the
 
 Default model is `qwen3.6:35b-a3b`. Reasoning models (qwen3, deepseek-r1) get `think: false` in the payload — without that, all generation lands in the `thinking` field and stdout stays empty. If your Ollama version ignores the flag, the tool warns at the end with alternative model suggestions.
 
+### Live monitoring
+
+Watch a session as it grows in a second terminal:
+
+```fish
+logbook tail                       # follow the active session
+logbook tail my-session            # follow a specific session
+logbook tail --lines 10            # show 10 recent events, then follow
+logbook tail --filter 'apt|systemctl'
+logbook tail --type note
+logbook tail --no-color            # plain output even on a TTY
+```
+
+The viewer polls the JSONL file every ~300 ms — no inotify dependency. On a TTY, events are colorized (✓ green ok, ✗ red fail, § yellow section, > cyan note) and tagged events get a bold magenta prefix. Piped or with `--no-color` / `NO_COLOR`, output is one flat machine-readable line per event with no banners.
+
+Without an explicit name, `tail` follows whichever session is currently active: pausing recording (`logbook off`) prints `⏸ session paused`, and a new `logbook init` switches the view to the new session with a separator. Ctrl+C exits cleanly.
+
+### Fish prompt integration
+
+`logbook.fish` exposes `__logbook_active_session` for use in your prompt. It only reads `~/.local/share/logbook/active` directly — no subprocess, no `logbook` invocation — so it's cheap enough for every prompt refresh:
+
+```fish
+function fish_prompt
+    # ... your existing prompt ...
+    set -l lb (__logbook_active_session)
+    if test -n "$lb"
+        printf '%s[📝 %s]%s ' (set_color brblue) $lb (set_color normal)
+    end
+end
+```
+
+For starship or tide, define a custom prompt module that reads `~/.local/share/logbook/active` (or `$XDG_DATA_HOME/logbook/active`) directly. The fish helper does the same thing inline and is the simplest path.
+
 ### Searching and status
 
 ```fish
@@ -207,7 +240,7 @@ logbook doc my-session --prompt runbook
 
 Fish completes dynamically:
 
-- Session names for `show`/`render`/`doc`/`edit`/`drop`/`prune`/`restore`
+- Session names for `show`/`render`/`doc`/`edit`/`drop`/`prune`/`restore`/`tail`
 - Prompt template names for `--prompt`
 - Installed Ollama models for `--model` (via `ollama list`)
 - All subcommands and `config <show|edit|path|reset>` actions

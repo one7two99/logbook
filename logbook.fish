@@ -11,6 +11,15 @@ else
     set -g __logbook_dir "$HOME/.local/share/logbook"
 end
 
+function __logbook_active_session --description "print active logbook session name (empty if inactive)"
+    # Für fish_prompt-Integration: nur File-Read, kein Subprocess, kein
+    # logbook-Aufruf — bleibt schnell genug für jeden Prompt-Refresh.
+    if test -f "$__logbook_dir/active"
+        set -l name (cat "$__logbook_dir/active" 2>/dev/null)
+        test -n "$name"; and echo $name
+    end
+end
+
 function __logbook_should_skip --argument-names cmd
     # Empty?
     test -z "$cmd"; and return 0

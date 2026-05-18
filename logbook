@@ -40,6 +40,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -1218,6 +1219,233 @@ def cmd_search(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# `logbook tail [name]` — Live-Viewer mit Polling (~300ms), stdlib only
+
+TAIL_GREEN = "\033[32m"
+TAIL_RED = "\033[31m"
+TAIL_YELLOW = "\033[33m"
+TAIL_CYAN = "\033[36m"
+TAIL_MAGENTA = "\033[35m"
+TAIL_BOLD = "\033[1m"
+TAIL_DIM = "\033[2m"
+TAIL_RESET = "\033[0m"
+
+
+def _tail_wrap(text: str, *codes: str, on: bool) -> str:
+    if not on or not codes:
+        return text
+    return "".join(codes) + text + TAIL_RESET
+
+
+def _tail_ts_short(ts: str) -> str:
+    """ISO 8601 → HH:MM:SS. Andere Strings: erste 8 Zeichen."""
+    if "T" in ts:
+        return ts.split("T", 1)[1][:8]
+    return ts[:8] if len(ts) >= 8 else ts
+
+
+def _tail_format_event(ev: dict, color_on: bool) -> str | None:
+    """Eine Zeile pro Event für den Live-View.
+
+    Returns None für init/unknown — die werden nicht gestreamt, init
+    landet im Banner."""
+    t = ev.get("type")
+    ts = _tail_ts_short(str(ev.get("ts", "")))
+    if t == "cmd":
+        ex = ev.get("exit", 0)
+        if ex == 0:
+            marker = _tail_wrap("✓     ", TAIL_GREEN, on=color_on)
+        else:
+            mtext = f"✗{ex}"
+            pad = max(1, 6 - len(mtext))
+            marker = _tail_wrap(mtext + " " * pad, TAIL_RED, on=color_on)
+        tag = ev.get("tag")
+        tag_prefix = ""
+        if isinstance(tag, str) and tag:
+            tag_prefix = _tail_wrap(f"#{tag}", TAIL_BOLD, TAIL_MAGENTA, on=color_on) + "  "
+        return f"{ts}  {tag_prefix}{marker}$ {ev.get('cmd', '')}"
+    if t == "section":
+        marker = _tail_wrap("§     ", TAIL_BOLD, TAIL_YELLOW, on=color_on)
+        return f"{ts}  {marker}{ev.get('title', '')}"
+    if t == "note":
+        marker = _tail_wrap(">     ", TAIL_DIM, TAIL_CYAN, on=color_on)
+        return f"{ts}  {marker}{ev.get('text', '')}"
+    return None
+
+
+def cmd_tail(args) -> int:
+    color_on = (
+        sys.stdout.isatty()
+        and not args.no_color
+        and not os.environ.get("NO_COLOR")
+    )
+
+    filt_re = None
+    if args.filter:
+        try:
+            filt_re = re.compile(args.filter)
+        except re.error as e:
+            print(f"invalid regex: {e}", file=sys.stderr)
+            return 2
+    type_filter = args.type
+
+    explicit = args.name
+    if explicit and not session_path(explicit).exists():
+        print(f"session not found: {explicit}", file=sys.stderr)
+        return 1
+
+    def _matches(ev: dict) -> bool:
+        t = ev.get("type")
+        if t not in ("cmd", "note", "section"):
+            return False
+        if type_filter and t != type_filter:
+            return False
+        if filt_re:
+            if t == "cmd":
+                content = ev.get("cmd", "")
+            elif t == "note":
+                content = ev.get("text", "")
+            else:
+                content = ev.get("title", "")
+            if not isinstance(content, str) or not filt_re.search(content):
+                return False
+        return True
+
+    def _emit(line: str) -> None:
+        print(line, flush=True)
+
+    def _banner(name: str) -> None:
+        if not color_on:
+            return
+        now_str = datetime.now().strftime("%H:%M:%S")
+        title = _tail_wrap(f"== session: {name} ==", TAIL_BOLD, on=color_on)
+        _emit(f"{title}    started watching at {now_str}")
+
+    def _paused() -> None:
+        if color_on:
+            _emit(_tail_wrap("⏸ session paused", TAIL_DIM, on=color_on))
+
+    def _no_active_msg() -> None:
+        if color_on:
+            _emit(_tail_wrap(
+                "⏸ no active session — start one with `logbook init <name>`",
+                TAIL_DIM,
+                on=color_on,
+            ))
+
+    def _separator() -> None:
+        if color_on:
+            _emit(_tail_wrap("---", TAIL_DIM, on=color_on))
+
+    def _read_new(path: Path, offset: int) -> tuple[int, list[dict]]:
+        evs: list[dict] = []
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
+                f.seek(offset)
+                for raw in f:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        evs.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+                new_off = f.tell()
+        except OSError:
+            return offset, []
+        return new_off, evs
+
+    def _seek_end(name: str) -> int:
+        try:
+            return session_path(name).stat().st_size
+        except OSError:
+            return 0
+
+    # Initiale Resolution. paused trennt "wir folgen sess X aber X ist gerade
+    # off" von "wir folgen niemandem" — so kann Resume auf X den alten
+    # Offset weiterlesen, statt zu skippen.
+    current_session: str | None = explicit or get_active()
+    current_offset: int = 0
+    paused = False
+    missing_warned = False
+
+    if current_session is None:
+        _no_active_msg()
+    else:
+        p = session_path(current_session)
+        _banner(current_session)
+        if p.exists():
+            if args.lines > 0:
+                events = load_events(current_session) or []
+                matched = [ev for ev in events if _matches(ev)]
+                for ev in matched[-args.lines:]:
+                    line = _tail_format_event(ev, color_on)
+                    if line is not None:
+                        _emit(line)
+            current_offset = _seek_end(current_session)
+
+    while True:
+        time.sleep(0.3)
+
+        # Ziel-Session: bei explicit fix, sonst active-File.
+        desired = explicit if explicit else get_active()
+
+        if desired is None:
+            # active wurde entfernt — Pause, State behalten für Resume.
+            if not paused and current_session is not None:
+                _paused()
+                paused = True
+            continue
+
+        if current_session is None:
+            # Erstes Aufleben aus "no active at start": skip to end (kein Replay).
+            current_session = desired
+            current_offset = _seek_end(desired)
+            paused = False
+            missing_warned = False
+            _banner(desired)
+        elif paused and desired == current_session:
+            # Resume derselben Session — Offset behalten, neue Events kommen.
+            paused = False
+        elif desired != current_session:
+            # Wechsel auf andere Session: Separator + Skip to End.
+            _separator()
+            current_session = desired
+            current_offset = _seek_end(desired)
+            paused = False
+            missing_warned = False
+            _banner(desired)
+
+        p = session_path(current_session)
+        if not p.exists():
+            # Race condition bei init oder gelöschte explicit Datei.
+            if explicit and not missing_warned:
+                print(
+                    f"warn: {p} verschwunden — polle weiter, falls sie wiederkommt",
+                    file=sys.stderr,
+                )
+                missing_warned = True
+            continue
+
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+
+        if size < current_offset:
+            # Truncation (z.B. nach manuellem edit) — von vorne lesen.
+            current_offset = 0
+        if size > current_offset:
+            new_off, evs = _read_new(p, current_offset)
+            for ev in evs:
+                if _matches(ev):
+                    line = _tail_format_event(ev, color_on)
+                    if line is not None:
+                        _emit(line)
+            current_offset = new_off
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1323,6 +1551,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--commit", action="store_true", help="(nur mit --save/--save-to) git add -A && git commit im Ziel-Repo")
     s.add_argument("--prompt-only", action="store_true", help="nur System+User-Prompt drucken, kein LLM-Call")
     s.set_defaults(func=cmd_doc)
+
+    s = sub.add_parser("tail", help="live-follow active or named session")
+    s.add_argument("name", nargs="?", help="session name (default: follow active)")
+    s.add_argument(
+        "--lines", "-n",
+        type=int, default=0, metavar="N",
+        help="show last N events before follow (default: 0)",
+    )
+    s.add_argument("--filter", metavar="REGEX", help="match cmd/note/section content")
+    s.add_argument(
+        "--type",
+        choices=["cmd", "note", "section"],
+        help="restrict to a single event type",
+    )
+    s.add_argument("--no-color", action="store_true", help="force plain output even on TTY")
+    s.set_defaults(func=cmd_tail)
 
     s = sub.add_parser("info", help="status dashboard (paths, ollama, config)")
     s.set_defaults(func=cmd_info)

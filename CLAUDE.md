@@ -82,9 +82,28 @@ Stack hinaus — Pragmatismus vor Generalität.
 - `CONFIG_SCHEMA`: zentrale Liste aller bekannten Keys mit Defaults —
   `config show` und `build_parser`-Defaults beide daran orientiert
 
+**Schritt 6 — Live-Viewer + Fish-Prompt-Indikator:**
+- `logbook tail [name]` — follow-mode für aktive oder benannte Session,
+  Polling alle 300 ms via `time.sleep`, stdlib only
+- Flags: `--lines N` (Replay vor follow), `--filter REGEX` (auf cmd/note/
+  section-Inhalt), `--type cmd|note|section`, `--no-color`
+- TTY-aware: ANSI-Farben + `== session: name ==`-Banner nur auf TTY;
+  `NO_COLOR` und `--no-color` erzwingen plain Output (eine Zeile pro
+  Event, kein Banner, keine "⏸"-Marker)
+- Auto-Follow ohne expliziten Namen: reagiert auf Session-Wechsel
+  (Separator + neues Banner) und `logbook off`/`on` (⏸-Marker)
+- Truncation-safe: bei Datei-Größenrückgang wird ab Offset 0 neu gelesen
+- Format: `HH:MM:SS  ✓     $ cmd` / `✗N` / `§` (section) / `>` (note);
+  Tag-Prefix `#tag` in bold magenta vor dem Marker
+- Helper-Function `__logbook_active_session` in `logbook.fish` für
+  Prompt-Integration (`fish_prompt`, starship, tide) — reiner File-Read,
+  kein Subprocess, README zeigt Beispiel
+- Fish-Tab-Completion und Manpage müssen separat gepflegt werden
+  (completions: erledigt; man: bei Bedarf nachziehen)
+
 **Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
 `tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
-`doc`, `config`, `info`, `search`, `help`, intern `_record`
+`doc`, `config`, `info`, `search`, `tail`, `help`, intern `_record`
 
 ---
 
@@ -193,17 +212,6 @@ Schritte 6–10 sind als zusammenhängende Iterations-Batches geplant —
 jeder Schritt ein abgeschlossener Claude-Code-Lauf, in der Reihenfolge
 unten. Affinität (gemeinsame Code-Pfade, gemeinsame Test-Setups)
 bestimmt die Bündelung innerhalb eines Schritts.
-
-### Schritt 6 — Live-Viewer + Fish-Prompt-Indikator
-
-- `logbook tail [name]` — follow-mode für aktive oder benannte Session,
-  polling-basiert (~300 ms), stdlib only, kein inotify
-- TTY-aware Ausgabe mit ANSI-Farben; `NO_COLOR` und `--no-color` respektiert
-- Filter: `--filter REGEX`, `--type cmd|note|section`, `--lines N`
-- Helper-Function `__logbook_active_session` in `logbook.fish` für
-  Prompt-Integration (printet Session-Name oder leer)
-- README-Beispiel wie User es in `fish_prompt` einbindet
-- Bewusst NICHT in diesem Schritt: `--explain`, LLM-Anbindung, Raw-TTY-Mode
 
 ### Schritt 7 — LLM-Explain (tail --explain + explain)
 
