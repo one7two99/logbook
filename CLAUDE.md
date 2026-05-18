@@ -216,14 +216,27 @@ bestimmt die Bündelung innerhalb eines Schritts.
 ### Schritt 7 — LLM-Explain (tail --explain + explain)
 
 - `logbook tail --explain` — Live-Viewer mit on-demand LLM-Erklärungen
-  per Key-Press (`e` für letztes Event, `E` für letzte 5 im Batch)
-- Raw-TTY-Mode via stdlib `termios` + `tty.setraw` für Tastenabfrage
-- `logbook explain <id>` — Standalone für einzelnes Event, mit
-  `name:id` Syntax für Cross-Session-Lookup
-- Neues Prompt-Template `explain.md` (idempotent angelegt wie `setup-doc.md`),
-  kurzer System-Prompt für 1–2-Satz-Erklärungen pro Befehl
-- Beide Wege teilen sich die LLM-Pipeline mit `cmd_doc`; Refactor zu
-  gemeinsamer `llm_explain(events)` Funktion falls sinnvoll
+  per Key-Press: `e` für letztes cmd-Event, `E` für letzte 5 im Batch,
+  `q` oder Ctrl+C für Exit
+- Raw-TTY-Mode via stdlib `termios` + `tty.setraw`; non-blocking
+  Input-Check via `select.select([sys.stdin], [], [], 0.3)` ersetzt das
+  `time.sleep(0.3)` im bestehenden Tail-Loop — Polling und Tastatur
+  interleaven sich sauber
+- `--explain` ohne TTY auf stdout/stdin → klarer Fehler, exit 2
+- `logbook explain <id>` / `logbook explain <name>:<id>` — Standalone
+  für einzelne Events, cross-session via `name:id` Syntax, pipeable
+  (kein TTY-Requirement)
+- Neues Prompt-Template `explain.md`, idempotent angelegt im selben
+  Bootstrap-Pfad wie `setup-doc.md`. Kurzer System-Prompt für
+  1–2-Satz-Erklärungen pro Befehl, auf Deutsch
+- **Reuse aus Schritt 6:** `_tail_format_event` für Event-Ausgabe,
+  `_tail_wrap` für ANSI-Wrapping, `TAIL_*` Color-Konstanten,
+  `color_on`-Detection-Pattern. Nicht duplizieren.
+- **Refactor:** gemeinsame `llm_generate_stream(*, system_prompt,
+  user_prompt, model, ...) -> Iterator[str]` aus `cmd_doc` extrahieren.
+  `cmd_doc`, `cmd_tail` (--explain) und `cmd_explain` nutzen denselben
+  Streaming-Pfad. Fehlerbehandlung (Connection-Refused, 404) ebenfalls
+  als shared Helper `format_ollama_error()`
 
 ### Schritt 8 — Reflection-Tools
 
