@@ -32,16 +32,21 @@ Line number in the JSONL file = event ID (1-indexed).
 """
 
 import argparse
+import atexit
+import collections
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
+import termios
 import time
 import tomllib
+import tty
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -93,6 +98,23 @@ Regeln:
 - Ton: nüchtern, knapp, Sysadmin-Niveau, kein Marketing
 - Sprache: Deutsch
 - Nichts erfinden — nur was im Log steht oder unmittelbar logisch folgt
+"""
+
+# Last-Resort-Fallback für `logbook explain` und `tail --explain`. Wird beim
+# ersten Aufruf nach $XDG_CONFIG_HOME/logbook/prompts/explain.md geschrieben.
+EXPLAIN_SYSTEM_PROMPT = """\
+Du bist ein technischer Assistent, der einzelne Shell-Kommandos im Kontext
+einer Linux-Installation kurz erklärt.
+
+Regeln:
+- 1–2 Sätze pro Befehl, maximal
+- Antworte auf Deutsch
+- Erkläre WAS der Befehl tut und WARUM er typischerweise nötig ist
+- Bei fehlgeschlagenen Befehlen (exit != 0): wahrscheinliche Ursache
+  kurz nennen, sofern aus dem Kontext erkennbar
+- Wiederhole nicht den Befehl selbst
+- Keine Marketing-Sprache, keine Höflichkeitsfloskeln
+- Bei mehreren Befehlen: pro Befehl eine kompakte Antwort, nummeriert
 """
 
 # Wird beim ersten `logbook doc` als auskommentierte Vorlage nach config.toml
@@ -218,6 +240,9 @@ def ensure_config_files() -> None:
     setup = PROMPTS_DIR / "setup-doc.md"
     if not setup.exists():
         setup.write_text(DOC_SYSTEM_PROMPT, encoding="utf-8")
+    explain = PROMPTS_DIR / "explain.md"
+    if not explain.exists():
+        explain.write_text(EXPLAIN_SYSTEM_PROMPT, encoding="utf-8")
 
 
 def load_prompt(name: str) -> str | None:
@@ -239,6 +264,8 @@ def load_prompt(name: str) -> str | None:
             return None
     if name == "setup-doc":
         return DOC_SYSTEM_PROMPT
+    if name == "explain":
+        return EXPLAIN_SYSTEM_PROMPT
     return None
 
 
@@ -776,27 +803,37 @@ def cmd_render(args) -> int:
     return 0
 
 
-def ollama_generate(prompt: str, model: str, system: str, endpoint: str, temperature: float):
-    """POSTs to <endpoint>/api/generate with stream=true. Yields response chunks.
+def llm_generate_stream(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    endpoint: str,
+    temperature: float,
+    seed: int,
+    think: bool,
+):
+    """Stream Ollama-Response-Chunks. Yields die "response"-Strings pro
+    NDJSON-Frame; beendet sich beim ersten Frame mit `done: true`.
 
-    NDJSON-Response: pro Zeile ein JSON-Objekt mit "response"-Feld; die
-    letzte Zeile trägt "done": true. urllib's Response ist iterable über
-    Zeilen — keine Buffer-Akrobatik nötig.
+    Geteilter Streaming-Pfad für cmd_doc, cmd_explain und cmd_tail
+    (--explain). Caller fängt urllib.error.URLError / HTTPError und rendert
+    sie via format_ollama_error().
 
-    `think: false`: bei Reasoning-Modellen (qwen3, deepseek-r1, ...) wandert
-    sonst alles in ein "thinking"-Feld und "response" bleibt leer — Caller
-    würde nichts sehen. Für die Docs-Anwendung wollen wir die Antwort, nicht
-    das Reasoning. Auf Nicht-Thinking-Modellen wird das Flag ignoriert.
+    `think`: bei Reasoning-Modellen (qwen3, deepseek-r1, ...) wandert sonst
+    alles in ein "thinking"-Feld und "response" bleibt leer — der Caller
+    würde nichts sehen. Auf Nicht-Thinking-Modellen wird das Flag
+    von Ollama ignoriert.
     """
     payload = {
         "model": model,
-        "system": system,
-        "prompt": prompt,
+        "system": system_prompt,
+        "prompt": user_prompt,
         "stream": True,
-        "think": bool(config_get("llm", "think", False)),
+        "think": think,
         "options": {
             "temperature": temperature,
-            "seed": int(config_get("llm", "seed", 42)),
+            "seed": seed,
         },
     }
     req = urllib.request.Request(
@@ -817,6 +854,78 @@ def ollama_generate(prompt: str, model: str, system: str, endpoint: str, tempera
             yield chunk.get("response", "")
             if chunk.get("done"):
                 return
+
+
+def format_ollama_error(exc, *, model: str, endpoint: str) -> str:
+    """Übersetzt Ollama-Transportfehler in deutsche User-Nachrichten.
+    Caller dekoriert weiter (Newlines, stderr vs stdout)."""
+    # HTTPError ist Subklasse von URLError — zuerst checken.
+    if isinstance(exc, urllib.error.HTTPError):
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        if exc.code == 404 or "model" in body.lower():
+            return (
+                f"Modell {model!r} nicht installiert. "
+                f"Pull: `ollama pull {model}`"
+            )
+        return f"Ollama-Fehler: HTTP {exc.code} — {body[:200]}"
+    if isinstance(exc, urllib.error.URLError):
+        if isinstance(exc.reason, ConnectionRefusedError):
+            return (
+                f"ollama nicht erreichbar unter {endpoint}. "
+                f"Läuft `ollama serve`? Status: "
+                f"`systemctl --user status ollama`"
+            )
+        return f"Verbindungsfehler: {exc.reason}"
+    return f"Fehler: {exc}"
+
+
+def _explain_user_prompt_single(ev: dict) -> str:
+    """User-Prompt für eine Einzel-Erklärung. Für cmd: Befehl + ggf. exit/cwd.
+    Für note/section: Kontext-Frage."""
+    t = ev.get("type")
+    if t == "cmd":
+        cmd = ev.get("cmd", "")
+        ex = ev.get("exit", 0)
+        cwd = ev.get("cwd", "")
+        tag = ev.get("tag", "")
+        meta: list[str] = []
+        if ex != 0:
+            meta.append(f"exit: {ex}")
+        if cwd:
+            meta.append(f"cwd: {cwd}")
+        if tag:
+            meta.append(f"tag: {tag}")
+        suffix = f"\n({', '.join(meta)})" if meta else ""
+        return f"Erkläre diesen Befehl:\n\n$ {cmd}{suffix}"
+    if t == "note":
+        return (
+            "Erkläre, was diese Notiz im Kontext einer Installation "
+            f"vermutlich meint:\n\n{ev.get('text', '')}"
+        )
+    if t == "section":
+        return (
+            "Erkläre kurz, was in dieser Setup-Phase üblicherweise "
+            f"passiert:\n\n## {ev.get('title', '')}"
+        )
+    return ""
+
+
+def _explain_user_prompt_batch(events: list[dict]) -> str:
+    """User-Prompt für 2-5 cmd-Events. Output erwartet nummerierte Liste."""
+    lines = [
+        f"Erkläre die folgenden {len(events)} Befehle, jeweils 1–2 Sätze, "
+        "nummeriert:\n"
+    ]
+    for i, ev in enumerate(events, 1):
+        cmd = ev.get("cmd", "")
+        ex = ev.get("exit", 0)
+        suffix = f"  (exit {ex})" if ex != 0 else ""
+        lines.append(f"{i}) $ {cmd}{suffix}")
+    return "\n".join(lines)
 
 
 def cmd_doc(args) -> int:
@@ -880,12 +989,14 @@ def cmd_doc(args) -> int:
     collected: list[str] = []
     got_any = False
     try:
-        for chunk in ollama_generate(
-            prompt=user_prompt,
+        for chunk in llm_generate_stream(
+            system_prompt=system,
+            user_prompt=user_prompt,
             model=args.model,
-            system=system,
             endpoint=args.endpoint,
             temperature=args.temperature,
+            seed=int(config_get("llm", "seed", 42)),
+            think=bool(config_get("llm", "think", False)),
         ):
             if chunk:
                 got_any = True
@@ -893,30 +1004,9 @@ def cmd_doc(args) -> int:
             sys.stdout.flush()
             if save_dir is not None:
                 collected.append(chunk)
-    except urllib.error.HTTPError as e:
-        body = ""
-        try:
-            body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        if e.code == 404 or "model" in body.lower():
-            print(
-                f"\nModell {args.model!r} nicht installiert. "
-                f"Pull: `ollama pull {args.model}`",
-                file=sys.stderr,
-            )
-            return 1
-        print(f"\nOllama-Fehler: HTTP {e.code} — {body[:200]}", file=sys.stderr)
-        return 1
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, ConnectionRefusedError):
-            print(
-                f"\nollama nicht erreichbar unter {args.endpoint}. "
-                f"Läuft `ollama serve`? Status: `systemctl --user status ollama`",
-                file=sys.stderr,
-            )
-            return 1
-        print(f"\nVerbindungsfehler: {e.reason}", file=sys.stderr)
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        msg = format_ollama_error(e, model=args.model, endpoint=args.endpoint)
+        print(f"\n{msg}", file=sys.stderr)
         return 1
 
     sys.stdout.write("\n")
@@ -1219,6 +1309,112 @@ def cmd_search(args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# `logbook explain <ref>` — Standalone-Erklärung eines Events via LLM
+
+def _parse_event_ref(ref: str) -> tuple[str | None, int] | None:
+    """`<id>` → (None, id) — Caller füllt active. `<name>:<id>` → (name, id).
+    Return None für unparseable Strings; Caller druckt Fehlertext."""
+    if ":" in ref:
+        name, _, id_str = ref.partition(":")
+        if not name or not valid_name(name):
+            return None
+        try:
+            ev_id = int(id_str)
+        except ValueError:
+            return None
+        if ev_id < 1:
+            return None
+        return (name, ev_id)
+    try:
+        ev_id = int(ref)
+    except ValueError:
+        return None
+    if ev_id < 1:
+        return None
+    return (None, ev_id)
+
+
+def cmd_explain(args) -> int:
+    # First-run setup: legt config.toml + prompts/{setup-doc,explain}.md
+    # idempotent an. Caller pfad #3 (neben doc / config edit).
+    ensure_config_files()
+
+    parsed = _parse_event_ref(args.ref)
+    if parsed is None:
+        print(
+            f"invalid event ref: {args.ref!r} (expected: N or <name>:N)",
+            file=sys.stderr,
+        )
+        return 1
+    name, ev_id = parsed
+    if name is None:
+        name = get_active()
+        if not name:
+            print(
+                "no active session — use `logbook explain <name>:<id>` "
+                "to target a session by name",
+                file=sys.stderr,
+            )
+            return 1
+
+    events = load_events(name)
+    if events is None:
+        return 1
+
+    ev = next((e for e in events if e.get("_line") == ev_id), None)
+    if ev is None:
+        print(f"event not found: {args.ref}", file=sys.stderr)
+        return 1
+
+    t = ev.get("type")
+    if t not in ("cmd", "note", "section"):
+        print(
+            f"can only explain cmd/note/section events (got: {t!r})",
+            file=sys.stderr,
+        )
+        return 1
+
+    system = load_prompt(args.prompt)
+    if system is None:
+        avail = sorted(p.stem for p in PROMPTS_DIR.glob("*.md")) if PROMPTS_DIR.exists() else []
+        if avail:
+            print(
+                f"prompt nicht gefunden: {args.prompt!r}\n"
+                f"verfügbar: {', '.join(avail)}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"prompt nicht gefunden: {args.prompt!r} "
+                f"(keine Templates in {PROMPTS_DIR})",
+                file=sys.stderr,
+            )
+        return 1
+
+    user_prompt = _explain_user_prompt_single(ev)
+
+    try:
+        for chunk in llm_generate_stream(
+            system_prompt=system,
+            user_prompt=user_prompt,
+            model=args.model,
+            endpoint=args.endpoint,
+            temperature=args.temperature,
+            seed=int(config_get("llm", "seed", 42)),
+            think=bool(config_get("llm", "think", False)),
+        ):
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        msg = format_ollama_error(e, model=args.model, endpoint=args.endpoint)
+        print(f"\n{msg}", file=sys.stderr)
+        return 1
+
+    sys.stdout.write("\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # `logbook tail [name]` — Live-Viewer mit Polling (~300ms), stdlib only
 
 TAIL_GREEN = "\033[32m"
@@ -1274,6 +1470,13 @@ def _tail_format_event(ev: dict, color_on: bool) -> str | None:
 
 
 def cmd_tail(args) -> int:
+    explain_mode = bool(getattr(args, "explain", False))
+    if explain_mode:
+        if not (sys.stdout.isatty() and sys.stdin.isatty()):
+            print("--explain requires a TTY", file=sys.stderr)
+            return 2
+        ensure_config_files()
+
     color_on = (
         sys.stdout.isatty()
         and not args.no_color
@@ -1294,6 +1497,19 @@ def cmd_tail(args) -> int:
         print(f"session not found: {explicit}", file=sys.stderr)
         return 1
 
+    # Cmd-Event-Historie für `e`/`E`. Unabhängig vom Filter — wer `--type
+    # note --explain` kombiniert, will trotzdem den letzten Befehl erklären.
+    history: collections.deque = collections.deque(maxlen=20)
+
+    # LLM-Settings einmal auflösen; Explain-Defaults: Temperature niedriger
+    # als doc (0.1) damit Erklärungen reproduzierbar/präzise bleiben.
+    lm_model = str(config_get("llm", "model", "qwen3.6:35b-a3b"))
+    lm_endpoint = str(config_get("llm", "endpoint", "http://localhost:11434"))
+    lm_temperature = float(config_get("llm", "temperature", 0.1))
+    lm_seed = int(config_get("llm", "seed", 42))
+    lm_think = bool(config_get("llm", "think", False))
+    explain_prompt_name = "explain"
+
     def _matches(ev: dict) -> bool:
         t = ev.get("type")
         if t not in ("cmd", "note", "section"):
@@ -1312,7 +1528,19 @@ def cmd_tail(args) -> int:
         return True
 
     def _emit(line: str) -> None:
-        print(line, flush=True)
+        # Im Raw-TTY-Mode ist OPOST aus → `\n` → CRLF muss explizit erfolgen.
+        if explain_mode:
+            sys.stdout.write(line.replace("\n", "\r\n") + "\r\n")
+            sys.stdout.flush()
+        else:
+            print(line, flush=True)
+
+    def _raw_write(text: str) -> None:
+        """Streaming-Output (LLM-Chunks, Prefix). CRLF-Translation in raw."""
+        if explain_mode:
+            text = text.replace("\n", "\r\n")
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
     def _banner(name: str) -> None:
         if not color_on:
@@ -1361,6 +1589,79 @@ def cmd_tail(args) -> int:
         except OSError:
             return 0
 
+    def _prefill_history(name: str) -> None:
+        """Lese alle cmd-Events aus der Session-Datei (ohne Filter) und
+        füttere die deque. Bei Session-Wechsel: vorher clear()."""
+        if not explain_mode:
+            return
+        evs = load_events(name) or []
+        for ev in evs:
+            if ev.get("type") == "cmd":
+                history.append(ev)
+
+    def _do_explain(targets: list[dict]) -> None:
+        """LLM-Stream einer Erklärung unter dem letzten Event. Blockiert
+        den Tail-Loop bewusst — Threading wäre overkill. Neue JSONL-Events
+        werden in der nächsten Iteration nachgezogen."""
+        prefix = "                  ↳ "
+        if not targets:
+            msg = prefix + "no cmd events yet (waiting…)"
+            if color_on:
+                msg = TAIL_CYAN + TAIL_DIM + msg + TAIL_RESET
+            _emit(msg)
+            return
+        system = load_prompt(explain_prompt_name) or EXPLAIN_SYSTEM_PROMPT
+        if color_on:
+            _raw_write(TAIL_CYAN + TAIL_DIM + prefix + TAIL_RESET)
+        else:
+            _raw_write(prefix)
+        if len(targets) == 1:
+            user_prompt = _explain_user_prompt_single(targets[0])
+        else:
+            user_prompt = _explain_user_prompt_batch(targets)
+        try:
+            for chunk in llm_generate_stream(
+                system_prompt=system,
+                user_prompt=user_prompt,
+                model=lm_model,
+                endpoint=lm_endpoint,
+                temperature=lm_temperature,
+                seed=lm_seed,
+                think=lm_think,
+            ):
+                if chunk:
+                    _raw_write(chunk)
+            _raw_write("\n")
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            err = format_ollama_error(e, model=lm_model, endpoint=lm_endpoint)
+            _raw_write("\n")
+            _emit(err)
+        except OSError as e:
+            _raw_write("\n")
+            _emit(f"Fehler beim LLM-Call: {e}")
+
+    # Raw-TTY-Setup: nur im explain-mode. atexit garantiert Restore bei
+    # ungefangenen Exceptions; das try/finally weiter unten ist die saubere
+    # Variante, atexit der Sicherheitsgurt.
+    if explain_mode:
+        _fd = sys.stdin.fileno()
+        _old_attrs = termios.tcgetattr(_fd)
+
+        def _restore_tty() -> None:
+            try:
+                termios.tcsetattr(_fd, termios.TCSADRAIN, _old_attrs)
+            except (termios.error, OSError):
+                pass
+
+        atexit.register(_restore_tty)
+        tty.setraw(_fd)
+        hint = "[e] explain last  [E] explain last 5  [q] quit"
+        if color_on:
+            hint = TAIL_DIM + hint + TAIL_RESET
+        _emit(hint)
+    else:
+        _restore_tty = lambda: None  # type: ignore[assignment]
+
     # Initiale Resolution. paused trennt "wir folgen sess X aber X ist gerade
     # off" von "wir folgen niemandem" — so kann Resume auf X den alten
     # Offset weiterlesen, statt zu skippen.
@@ -1382,10 +1683,27 @@ def cmd_tail(args) -> int:
                     line = _tail_format_event(ev, color_on)
                     if line is not None:
                         _emit(line)
+            _prefill_history(current_session)
             current_offset = _seek_end(current_session)
 
     while True:
-        time.sleep(0.3)
+        if explain_mode:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.3)
+            if ready:
+                try:
+                    key = sys.stdin.read(1)
+                except (OSError, ValueError):
+                    key = ""
+                if key in ("q", "\x03"):
+                    _restore_tty()
+                    return 0
+                if key == "e":
+                    _do_explain([history[-1]] if history else [])
+                elif key == "E":
+                    _do_explain(list(history)[-5:])
+                # Andere Tasten: silent ignore.
+        else:
+            time.sleep(0.3)
 
         # Ziel-Session: bei explicit fix, sonst active-File.
         desired = explicit if explicit else get_active()
@@ -1404,6 +1722,7 @@ def cmd_tail(args) -> int:
             paused = False
             missing_warned = False
             _banner(desired)
+            _prefill_history(desired)
         elif paused and desired == current_session:
             # Resume derselben Session — Offset behalten, neue Events kommen.
             paused = False
@@ -1414,6 +1733,9 @@ def cmd_tail(args) -> int:
             current_offset = _seek_end(desired)
             paused = False
             missing_warned = False
+            if explain_mode:
+                history.clear()
+            _prefill_history(desired)
             _banner(desired)
 
         p = session_path(current_session)
@@ -1438,6 +1760,8 @@ def cmd_tail(args) -> int:
         if size > current_offset:
             new_off, evs = _read_new(p, current_offset)
             for ev in evs:
+                if explain_mode and ev.get("type") == "cmd":
+                    history.append(ev)
                 if _matches(ev):
                     line = _tail_format_event(ev, color_on)
                     if line is not None:
@@ -1566,7 +1890,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="restrict to a single event type",
     )
     s.add_argument("--no-color", action="store_true", help="force plain output even on TTY")
+    s.add_argument(
+        "--explain",
+        action="store_true",
+        help="raw-TTY mode mit On-Demand-LLM-Erklärungen: [e]/[E] erklären letzte(n) Befehl(e), [q] quit",
+    )
     s.set_defaults(func=cmd_tail)
+
+    s = sub.add_parser("explain", help="ein einzelnes Event via LLM erklären")
+    s.add_argument(
+        "ref",
+        help="event id (z.B. 5) oder <session>:<id> (z.B. trixie-setup:42)",
+    )
+    s.add_argument(
+        "--model",
+        default=config_get("llm", "model", "qwen3.6:35b-a3b"),
+        help="Ollama-Modell (default: aus config.toml oder qwen3.6:35b-a3b)",
+    )
+    s.add_argument(
+        "--endpoint",
+        default=config_get("llm", "endpoint", "http://localhost:11434"),
+        help="Ollama-Endpoint (default: aus config.toml oder http://localhost:11434)",
+    )
+    s.add_argument(
+        "--temperature",
+        type=float,
+        default=float(config_get("llm", "temperature", 0.1)),
+        help="sampling temperature (default: aus config.toml oder 0.1 — niedriger als doc)",
+    )
+    s.add_argument(
+        "--prompt",
+        default="explain",
+        metavar="NAME",
+        help="Prompt-Template <XDG_CONFIG>/prompts/<NAME>.md (default: explain)",
+    )
+    s.set_defaults(func=cmd_explain)
 
     s = sub.add_parser("info", help="status dashboard (paths, ollama, config)")
     s.set_defaults(func=cmd_info)

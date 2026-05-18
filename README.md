@@ -159,6 +159,36 @@ The viewer polls the JSONL file every ~300 ms — no inotify dependency. On a TT
 
 Without an explicit name, `tail` follows whichever session is currently active: pausing recording (`logbook off`) prints `⏸ session paused`, and a new `logbook init` switches the view to the new session with a separator. Ctrl+C exits cleanly.
 
+### Live monitoring with LLM explanations
+
+`logbook tail --explain` adds on-demand LLM-generated explanations to the live view. Requires Ollama running (any model from `[llm].model` works; reasoning models with `[llm].think = false` are recommended) and a TTY on both stdin and stdout.
+
+```fish
+logbook tail --explain                # follow active session with key bindings
+```
+
+Keys (single-byte raw-TTY mode):
+
+- `e` — explain the **last cmd event** in 1–2 sentences. Output streams inline, indented under the event with a `↳` prefix.
+- `E` — explain the **last 5 cmd events** as one batched, numbered call (fewer than 5 if the session is shorter).
+- `q` or Ctrl+C — exit cleanly; the terminal state is restored.
+- Any other key is silently ignored.
+
+While the LLM streams its reply, the polling loop blocks (no threading). Any JSONL events that arrive during the call appear in the next iteration — slightly delayed but never lost. If Ollama is unreachable, the error renders into the explanation area and the loop keeps running.
+
+For a one-shot explanation outside the live viewer:
+
+```fish
+logbook explain 42                    # event #42 in the active session
+logbook explain trixie-setup:17       # event #17 of a named session
+logbook explain 42 --model llama3.1:8b --temperature 0  # override defaults
+logbook explain 42 --prompt my-template                 # custom prompt
+```
+
+`explain` is fully pipeable (no TTY requirement), streams the same way as `doc`, and works on `cmd`, `note`, and `section` events. Default temperature is `0.1` — explanations should be reproducible, not creative — overridable via CLI flag or `[llm].temperature`.
+
+The system prompt comes from `~/.config/logbook/prompts/explain.md`, bootstrapped on first run alongside `setup-doc.md`. Edit it to change tone, language, or verbosity.
+
 ### Fish prompt integration
 
 `logbook.fish` exposes `__logbook_active_session` for use in your prompt. It only reads `~/.local/share/logbook/active` directly — no subprocess, no `logbook` invocation — so it's cheap enough for every prompt refresh:

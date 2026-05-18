@@ -65,11 +65,18 @@ complete -c logbook -n "__fish_use_subcommand" -a config  -d "Konfiguration verw
 complete -c logbook -n "__fish_use_subcommand" -a info    -d "Status-Dashboard"
 complete -c logbook -n "__fish_use_subcommand" -a search  -d "grep über cmd+note Felder"
 complete -c logbook -n "__fish_use_subcommand" -a tail    -d "Live-Viewer (follow JSONL)"
+complete -c logbook -n "__fish_use_subcommand" -a explain -d "Event via LLM erklären"
 complete -c logbook -n "__fish_use_subcommand" -a help    -d "Hilfe (optional zu einem Subcommand)"
 
 # --- Session-Namen wo eine Session erwartet wird ---------------------------
 
 complete -c logbook -n "__fish_seen_subcommand_from show render doc edit drop prune restore tail" \
+    -a "(__logbook_sessions)" -d "Session"
+
+# explain nimmt entweder eine bare event-id (numerisch, schwer zu completen)
+# oder <session>:<id>. Wir bieten zumindest die Session-Namen mit nachgestelltem
+# Doppelpunkt an, damit das Tippen kürzer wird.
+complete -c logbook -n "__fish_seen_subcommand_from explain" \
     -a "(__logbook_sessions)" -d "Session"
 
 # --- `config <action>` -----------------------------------------------------
@@ -82,7 +89,7 @@ complete -c logbook -n "__fish_seen_subcommand_from config; and __fish_seen_subc
 # --- `help <subcommand>` ---------------------------------------------------
 
 complete -c logbook -n "__fish_seen_subcommand_from help" \
-    -a "init on off status note section tag list show edit drop prune restore render doc config info search tail help"
+    -a "init on off status note section tag list show edit drop prune restore render doc config info search tail explain help"
 
 # --- Flags für `doc` -------------------------------------------------------
 
@@ -121,6 +128,14 @@ complete -c logbook -n "__fish_seen_subcommand_from tail" -l lines -s n -x -d "l
 complete -c logbook -n "__fish_seen_subcommand_from tail" -l filter -x -d "Regex auf cmd/note/section"
 complete -c logbook -n "__fish_seen_subcommand_from tail" -l type -x -d "Event-Typ" -a "cmd note section"
 complete -c logbook -n "__fish_seen_subcommand_from tail" -l no-color -d "plain output trotz TTY"
+complete -c logbook -n "__fish_seen_subcommand_from tail" -l explain  -d "Raw-TTY-Mode mit LLM-Erklärungen [e]/[E]/[q]"
+
+# --- Flags für `explain` ---------------------------------------------------
+
+complete -c logbook -n "__fish_seen_subcommand_from explain" -l model       -x -d "Ollama-Modell"   -a "(__logbook_ollama_models)"
+complete -c logbook -n "__fish_seen_subcommand_from explain" -l prompt      -x -d "Prompt-Template" -a "(__logbook_prompts)"
+complete -c logbook -n "__fish_seen_subcommand_from explain" -l endpoint    -x -d "Ollama URL"
+complete -c logbook -n "__fish_seen_subcommand_from explain" -l temperature -x -d "sampling temperature 0.0-2.0"
 
 # --- Top-level Flags -------------------------------------------------------
 
