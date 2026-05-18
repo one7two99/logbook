@@ -169,6 +169,9 @@ $XDG_CONFIG_HOME/logbook/  (default: ~/.config/logbook/)
    einführt: argparse-`default=config_get(section, key, hardcode_default)`.
    Keine eigenen Lookup-Pfade — Konsistenz ist hier wichtiger als
    lokale Optimierung.
+9. **`NO_COLOR` und `--no-color` respektieren** bei jedem neuen TTY-Output.
+   Konvention: `sys.stdout.isatty()` UND nicht `NO_COLOR` gesetzt UND
+   nicht `--no-color` → ANSI-Escapes erlaubt. Sonst plain.
 
 ---
 
@@ -186,7 +189,70 @@ $XDG_CONFIG_HOME/logbook/  (default: ~/.config/logbook/)
 
 ## Nächste Schritte (Priorität absteigend)
 
-### Schritt 4.6 — Zusätzliche Prompt-Templates
+Schritte 6–10 sind als zusammenhängende Iterations-Batches geplant —
+jeder Schritt ein abgeschlossener Claude-Code-Lauf, in der Reihenfolge
+unten. Affinität (gemeinsame Code-Pfade, gemeinsame Test-Setups)
+bestimmt die Bündelung innerhalb eines Schritts.
+
+### Schritt 6 — Live-Viewer + Fish-Prompt-Indikator
+
+- `logbook tail [name]` — follow-mode für aktive oder benannte Session,
+  polling-basiert (~300 ms), stdlib only, kein inotify
+- TTY-aware Ausgabe mit ANSI-Farben; `NO_COLOR` und `--no-color` respektiert
+- Filter: `--filter REGEX`, `--type cmd|note|section`, `--lines N`
+- Helper-Function `__logbook_active_session` in `logbook.fish` für
+  Prompt-Integration (printet Session-Name oder leer)
+- README-Beispiel wie User es in `fish_prompt` einbindet
+- Bewusst NICHT in diesem Schritt: `--explain`, LLM-Anbindung, Raw-TTY-Mode
+
+### Schritt 7 — LLM-Explain (tail --explain + explain)
+
+- `logbook tail --explain` — Live-Viewer mit on-demand LLM-Erklärungen
+  per Key-Press (`e` für letztes Event, `E` für letzte 5 im Batch)
+- Raw-TTY-Mode via stdlib `termios` + `tty.setraw` für Tastenabfrage
+- `logbook explain <id>` — Standalone für einzelnes Event, mit
+  `name:id` Syntax für Cross-Session-Lookup
+- Neues Prompt-Template `explain.md` (idempotent angelegt wie `setup-doc.md`),
+  kurzer System-Prompt für 1–2-Satz-Erklärungen pro Befehl
+- Beide Wege teilen sich die LLM-Pipeline mit `cmd_doc`; Refactor zu
+  gemeinsamer `llm_explain(events)` Funktion falls sinnvoll
+
+### Schritt 8 — Reflection-Tools
+
+- `logbook scrub` — heuristische Secrets-Detection und -Maskierung:
+  - Patterns: `Authorization: Bearer`, `-p<pw>`, `--password`,
+    AWS Access Keys (`AKIA[0-9A-Z]{16}`), generische
+    `password=`/`token=`/`secret=`
+  - Interaktiv mit Bestätigung pro Treffer, `-y` für blind
+  - Backup wie üblich nach `.jsonl.bak`
+- `logbook stats` — aggregierte Meta-Info über alle Sessions:
+  - Counts: Sessions, Events (total + per type), Failure-Rate
+  - Top-Befehle cross-session, längste/neueste Session
+  - Reine Lese-Operation, kein State-Change
+
+### Schritt 9 — Session-Templates
+
+- `$XDG_CONFIG_HOME/logbook/session-templates/<name>.toml`
+- `logbook init-from-template <template> <session>` — neue Session
+  anlegen, vorgegebene Sections + initiale Notes aus dem Template
+  eintragen
+- `logbook templates list` / `logbook templates edit <name>`
+- Beim ersten Lauf idempotent ein `debian-base.toml`-Beispiel-Template
+  anlegen (analog zu `setup-doc.md`)
+
+### Schritt 10 — logbook diff
+
+- `logbook diff <session-a> <session-b>` — Vergleich zweier Sessions
+- Plain-Mode: semantischer Sequenz-Diff via stdlib `difflib`
+  (Vergleich auf cmd-Inhalt, nicht JSONL-Line-Diff)
+- LLM-Mode (`--llm`): prose Beschreibung der Unterschiede via Ollama,
+  neues Prompt-Template `diff.md`
+- Output: gut lesbarer unified- oder side-by-side-Diff
+
+### Schritt 4.6 — Zusätzliche Prompt-Templates (deferred)
+
+Aktuell deprioritisiert zugunsten der Schritte 6–10. Reaktivieren wenn
+nach Dogfooding klar wird welche Templates wirklich gebraucht werden.
 
 - `runbook.md` — Schritt-für-Schritt-Operations-Anleitung für wiederholte
   Maintenance-Tasks (z.B. Service-Migration, Backup-Cycle)
