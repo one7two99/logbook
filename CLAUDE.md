@@ -103,7 +103,8 @@ Stack hinaus — Pragmatismus vor Generalität.
 
 **Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
 `tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
-`doc`, `config`, `info`, `search`, `tail`, `help`, intern `_record`
+`doc`, `config`, `info`, `search`, `tail`, `explain`, `help`,
+intern `_record`
 
 ---
 

@@ -156,6 +156,88 @@ destructive operation.
 **logbook help** \[*topic*\]
 :   Show general help, or detailed help for *topic* (a subcommand name).
 
+# LIVE MONITORING
+
+**logbook tail** \[*name*\] \[*options*\]
+:   Follow the active or a named session in real time. Polls the JSONL
+    file every ~300 ms; no inotify or third-party watcher needed. On a
+    TTY, events are colorized and prefixed with a session banner; piped
+    output is plain one-line-per-event.
+
+    Without *name*, **tail** follows whichever session is currently
+    active and reacts to **logbook off**/**logbook on** with a paused
+    marker, and to **logbook init** of a different session with a
+    separator and new banner. Ctrl+C exits cleanly.
+
+    Options:
+
+    **\--lines** *N*, **-n** *N*
+    :   Replay the last *N* events before starting to follow.
+        Default: 0 (start at end).
+
+    **\--filter** *regex*
+    :   Only show events whose cmd, note text, or section title
+        matches *regex*.
+
+    **\--type** *cmd*|*note*|*section*
+    :   Restrict the view to a single event type.
+
+    **\--no-color**
+    :   Force plain output even on a TTY. Also respected via the
+        **NO_COLOR** environment variable.
+
+    **\--explain**
+    :   Raw-TTY interactive mode. Requires a TTY on both stdin and
+        stdout; otherwise exits 2 with an error. Adds key bindings for
+        on-demand LLM-generated explanations of recently captured
+        commands. The terminal state is restored on every exit path,
+        including uncaught exceptions and SIGINT.
+
+        Key bindings while in **\--explain** mode:
+
+        - **e** — explain the most recent cmd event in 1–2 sentences.
+        - **E** — explain the last up-to-5 cmd events as a single
+          batched, numbered LLM call.
+        - **q** or Ctrl+C — exit cleanly.
+
+        Explanations stream inline under the event with an indented
+        arrow prefix. While the LLM is streaming, the polling loop
+        blocks; any new JSONL events arriving in that window appear in
+        the next iteration. The LLM call uses the same Ollama settings
+        as **logbook doc** (model, endpoint, seed, think) with a
+        default temperature of 0.1 for reproducibility.
+
+**logbook explain** *ref* \[*options*\]
+:   Generate a one-shot LLM-rendered explanation for a single event.
+    Pipeable; no TTY requirement. Supports *cmd*, *note*, and *section*
+    events; other event types are rejected with exit 1.
+
+    *ref* may be:
+
+    - *id* — an integer line number in the active session.
+    - *name*:*id* — cross-session form, e.g. *trixie-setup:42*.
+
+    On first invocation, creates *prompts/explain.md* in
+    **\$XDG_CONFIG_HOME/logbook/** alongside *setup-doc.md* (idempotent,
+    never overwritten).
+
+    Options:
+
+    **\--model** *model*
+    :   Override the Ollama model. Default: from config or
+        *qwen3.6:35b-a3b*.
+
+    **\--endpoint** *url*
+    :   Override the Ollama URL. Default: *http://localhost:11434*.
+
+    **\--temperature** *float*
+    :   Override sampling temperature. Default: 0.1 (lower than
+        **logbook doc** to keep explanations reproducible).
+
+    **\--prompt** *name*
+    :   Use prompt template *name* from
+        **\$XDG_CONFIG_HOME/logbook/prompts/**. Default: *explain*.
+
 # CONFIGURATION
 
 **logbook config show**
@@ -246,6 +328,23 @@ Generate prose documentation with a small local model:
 Search for past nvidia-related work across all sessions:
 
     logbook search -i nvidia
+
+Watch a session live in a second terminal, filtered to apt and
+systemctl operations:
+
+    logbook tail --filter 'apt|systemctl'
+
+Or watch with interactive LLM explanations on demand (TTY only):
+
+    logbook tail --explain
+
+Explain an event from a past session, e.g. event 42 of *trixie*:
+
+    logbook explain trixie:42
+
+Override the model for a one-off explanation in the active session:
+
+    logbook explain 17 --model llama3.1:8b
 
 # LIMITATIONS
 
