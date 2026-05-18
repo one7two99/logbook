@@ -17,7 +17,7 @@ Stack hinaus — Pragmatismus vor Generalität.
 
 ---
 
-## Aktueller Stand (MVP — Schritte 1+2+3+4+4.5+6+7, ✅ done)
+## Aktueller Stand (MVP — Schritte 1+2+3+4+4.5, ✅ done)
 
 **Schritt 1 — Recording + Render:**
 - Python 3 single-file binary (`logbook`), **stdlib only**, kein pip
@@ -101,47 +101,9 @@ Stack hinaus — Pragmatismus vor Generalität.
 - Fish-Tab-Completion und Manpage müssen separat gepflegt werden
   (completions: erledigt; man: bei Bedarf nachziehen)
 
-**Schritt 7 — LLM-Explain (tail --explain + explain):**
-- `logbook tail --explain` — Raw-TTY-Mode mit on-demand LLM-Erklärungen:
-  `[e]` erklärt das letzte cmd-Event, `[E]` die letzten 5 als nummerierten
-  Batch-Call, `[q]` oder Ctrl+C verlassen sauber. Hint-Zeile beim Start
-- TTY-Check auf stdout UND stdin; ohne TTY exit 2 mit klarer Meldung
-- `termios` + `tty.setraw` für Single-Byte-Reads; `atexit.register` stellt
-  Terminal-State bei jedem Exit wieder her (uncaught Exception, KeyboardInterrupt).
-  Zusätzlich explizites Restore vor `return 0` bei `q`/Ctrl+C
-- `select.select([sys.stdin], [], [], 0.3)` ersetzt `time.sleep(0.3)` —
-  selbe Polling-Granularität, Tastatur interleaved. Non-explain-Mode
-  bleibt unverändert auf `time.sleep`
-- `collections.deque(maxlen=20)` für cmd-Event-Historie; befüllt aus
-  bestehender JSONL beim Start und bei Session-Wechsel, dann live aus
-  neuen Events (unabhängig von `--filter`/`--type` — `e` erklärt immer
-  den letzten Befehl)
-- Während LLM-Stream blockiert der Loop bewusst (KISS, kein Threading);
-  während dieser Zeit auflaufende JSONL-Events werden nach Rückkehr
-  in der nächsten Iteration nachgezogen
-- Output unter dem Event eingerückt: Prefix `"                  ↳ "`
-  (cyan dim), dann LLM-Chunks gestreamt. Im Raw-Mode (OPOST off) macht
-  `_emit`/`_raw_write` explizite `\n`→`\r\n`-Translation
-- `logbook explain <ref>` — Standalone für ein einzelnes Event:
-  `<id>` für active session, `<name>:<id>` cross-session. Pipeable
-  (kein TTY-Requirement). cmd/note/section unterstützt; andere Event-Types
-  → exit 1
-- Default-Temperature für Explain: **0.1** (reproduzierbar, nicht kreativ).
-  CLI-Flag und `[llm].temperature` überschreiben
-- Prompt-Template `explain.md`: idempotent angelegt beim ersten
-  `doc`/`explain`/`tail --explain`/`config edit`. Kurzer System-Prompt für
-  1–2-Satz-Erklärungen, Deutsch, nummeriert bei Batches
-- **Shared LLM-Pfad:** `llm_generate_stream(*, system_prompt, user_prompt,
-  model, endpoint, temperature, seed, think)` aus dem Inline-Code in
-  `cmd_doc` extrahiert. Nutzer: `cmd_doc`, `cmd_explain`, `cmd_tail`
-  (--explain). Plus `format_ollama_error(exc, *, model, endpoint)` für
-  deutsche Fehlermeldungen (Connection-Refused → "Läuft `ollama serve`?";
-  404 → "`ollama pull <model>` nötig"; HTTP-Error → `HTTP <code>`)
-
 **Subcommands:** `init`, `on`, `off`, `status`, `note`, `section`,
 `tag`, `edit`, `drop`, `prune`, `restore`, `list`, `show`, `render`,
-`doc`, `config`, `info`, `search`, `tail`, `explain`, `help`,
-intern `_record`
+`doc`, `config`, `info`, `search`, `tail`, `help`, intern `_record`
 
 ---
 
@@ -229,6 +191,18 @@ $XDG_CONFIG_HOME/logbook/  (default: ~/.config/logbook/)
 9. **`NO_COLOR` und `--no-color` respektieren** bei jedem neuen TTY-Output.
    Konvention: `sys.stdout.isatty()` UND nicht `NO_COLOR` gesetzt UND
    nicht `--no-color` → ANSI-Escapes erlaubt. Sonst plain.
+10. **Doku-Synchronisation.** Jeder neue Subcommand oder jedes neue Flag
+    muss synchron in fünf Stellen landen — sonst gilt das Feature als
+    unfertig:
+    - `logbook` (Code + Modul-Docstring wo relevant)
+    - `logbook.completions.fish` (Tab-Completion-Eintrag)
+    - `README.md` (User-Beispiel im Usage-Bereich)
+    - `man/logbook.1.md` (Man-Page-Source, pandoc-gebaut)
+    - `CLAUDE.md` (Aktueller Stand + ggf. Subcommand-Liste)
+    
+    Implementation-Prompts müssen das explizit auflisten. Bei einer
+    Iteration mit neuem Feature `X`: alle fünf Stellen oder das Feature
+    landet nicht in `Aktueller Stand`.
 
 ---
 
@@ -250,6 +224,31 @@ Schritte 6–10 sind als zusammenhängende Iterations-Batches geplant —
 jeder Schritt ein abgeschlossener Claude-Code-Lauf, in der Reihenfolge
 unten. Affinität (gemeinsame Code-Pfade, gemeinsame Test-Setups)
 bestimmt die Bündelung innerhalb eines Schritts.
+
+### Schritt 7 — LLM-Explain (tail --explain + explain)
+
+- `logbook tail --explain` — Live-Viewer mit on-demand LLM-Erklärungen
+  per Key-Press: `e` für letztes cmd-Event, `E` für letzte 5 im Batch,
+  `q` oder Ctrl+C für Exit
+- Raw-TTY-Mode via stdlib `termios` + `tty.setraw`; non-blocking
+  Input-Check via `select.select([sys.stdin], [], [], 0.3)` ersetzt das
+  `time.sleep(0.3)` im bestehenden Tail-Loop — Polling und Tastatur
+  interleaven sich sauber
+- `--explain` ohne TTY auf stdout/stdin → klarer Fehler, exit 2
+- `logbook explain <id>` / `logbook explain <name>:<id>` — Standalone
+  für einzelne Events, cross-session via `name:id` Syntax, pipeable
+  (kein TTY-Requirement)
+- Neues Prompt-Template `explain.md`, idempotent angelegt im selben
+  Bootstrap-Pfad wie `setup-doc.md`. Kurzer System-Prompt für
+  1–2-Satz-Erklärungen pro Befehl, auf Deutsch
+- **Reuse aus Schritt 6:** `_tail_format_event` für Event-Ausgabe,
+  `_tail_wrap` für ANSI-Wrapping, `TAIL_*` Color-Konstanten,
+  `color_on`-Detection-Pattern. Nicht duplizieren.
+- **Refactor:** gemeinsame `llm_generate_stream(*, system_prompt,
+  user_prompt, model, ...) -> Iterator[str]` aus `cmd_doc` extrahieren.
+  `cmd_doc`, `cmd_tail` (--explain) und `cmd_explain` nutzen denselben
+  Streaming-Pfad. Fehlerbehandlung (Connection-Refused, 404) ebenfalls
+  als shared Helper `format_ollama_error()`
 
 ### Schritt 8 — Reflection-Tools
 
